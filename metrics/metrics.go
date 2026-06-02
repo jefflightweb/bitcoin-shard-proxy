@@ -137,12 +137,14 @@ type Recorder struct {
 	tcpConnections      metric.Int64Counter
 	tcpBytesReceived    metric.Int64Counter
 
-	// Ingress TxID dedup
-	ingressDeduped    metric.Int64Counter // by worker, iface, frame_type
-	txidClaimLocalHit metric.Int64Counter
-	txidClaimWon      metric.Int64Counter
-	txidClaimLost     metric.Int64Counter
-	txidClaimError    metric.Int64Counter
+	// Ingress TxID dedup — TxidClaim* are per-packet on the hot path
+	// when dedup is on, so they are direct prometheus.Counter handles
+	// keyed by prefix (one allocation per distinct prefix at startup).
+	ingressDeduped        metric.Int64Counter // by worker, iface, frame_type (cold)
+	promTxidClaimLocalHit *promclient.CounterVec
+	promTxidClaimWon      *promclient.CounterVec
+	promTxidClaimLost     *promclient.CounterVec
+	promTxidClaimError    *promclient.CounterVec
 
 	// Per-(iface, group) prometheus.Counter pair cache — used by
 	// flowCounters() for [packets, bytes] handles.
@@ -387,21 +389,31 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("Frames suppressed by the ingress TxID dedup gate (sibling proxy or listener already claimed the TxID)")); err != nil {
 		return nil, err
 	}
-	if r.txidClaimLocalHit, err = meter.Int64Counter("bsp_txid_claim_local_hit_total",
-		metric.WithDescription("Tier-1 local-LRU short-circuits during TxID claim (no Redis call)")); err != nil {
-		return nil, err
-	}
-	if r.txidClaimWon, err = meter.Int64Counter("bsp_txid_claim_won_total",
-		metric.WithDescription("Tier-2 Redis SETNX wins during TxID claim (frame proceeds to multicast)")); err != nil {
-		return nil, err
-	}
-	if r.txidClaimLost, err = meter.Int64Counter("bsp_txid_claim_lost_total",
-		metric.WithDescription("Tier-2 Redis SETNX losses during TxID claim (sibling already claimed; frame dropped)")); err != nil {
-		return nil, err
-	}
-	if r.txidClaimError, err = meter.Int64Counter("bsp_txid_claim_errors_total",
-		metric.WithDescription("Redis errors during TxID claim (fail-open: frame was forwarded)")); err != nil {
-		return nil, err
+	// TxidClaim* are per-packet when ingress dedup is on; direct prometheus
+	// counters to skip the ~10% CPU spent in OTel int64Counter.Add.
+	r.promTxidClaimLocalHit = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_txid_claim_local_hit_total",
+		Help: "Tier-1 local-LRU short-circuits during TxID claim (no Redis call)",
+	}, []string{"prefix"})
+	r.promTxidClaimWon = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_txid_claim_won_total",
+		Help: "Tier-2 Redis SETNX wins during TxID claim (frame proceeds to multicast)",
+	}, []string{"prefix"})
+	r.promTxidClaimLost = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_txid_claim_lost_total",
+		Help: "Tier-2 Redis SETNX losses during TxID claim (sibling already claimed; frame dropped)",
+	}, []string{"prefix"})
+	r.promTxidClaimError = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_txid_claim_errors_total",
+		Help: "Redis errors during TxID claim (fail-open: frame was forwarded)",
+	}, []string{"prefix"})
+	for _, c := range []promclient.Collector{
+		r.promTxidClaimLocalHit, r.promTxidClaimWon,
+		r.promTxidClaimLost, r.promTxidClaimError,
+	} {
+		if regErr := reg.Register(c); regErr != nil {
+			return nil, fmt.Errorf("metrics: register txid-claim counter: %w", regErr)
+		}
 	}
 
 	return r, nil
@@ -472,30 +484,22 @@ func (r *Recorder) IngressDeduped(iface string, workerID int, frameType string) 
 // TxidClaimLocalHit records a tier-1 local-LRU short-circuit during TxID
 // dedup; the frame was suppressed without a Redis call.
 func (r *Recorder) TxidClaimLocalHit(prefix string) {
-	r.txidClaimLocalHit.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("prefix", prefix),
-	))
+	r.promTxidClaimLocalHit.WithLabelValues(prefix).Inc()
 }
 
 // TxidClaimWon records a tier-2 SETNX win during TxID dedup (frame proceeds).
 func (r *Recorder) TxidClaimWon(prefix string) {
-	r.txidClaimWon.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("prefix", prefix),
-	))
+	r.promTxidClaimWon.WithLabelValues(prefix).Inc()
 }
 
 // TxidClaimLost records a tier-2 SETNX loss during TxID dedup (frame dropped).
 func (r *Recorder) TxidClaimLost(prefix string) {
-	r.txidClaimLost.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("prefix", prefix),
-	))
+	r.promTxidClaimLost.WithLabelValues(prefix).Inc()
 }
 
 // TxidClaimError records a Redis error during TxID dedup (fail-open).
 func (r *Recorder) TxidClaimError(prefix string) {
-	r.txidClaimError.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("prefix", prefix),
-	))
+	r.promTxidClaimError.WithLabelValues(prefix).Inc()
 }
 
 // TCPConnectionAccepted records an accepted TCP ingress connection.
