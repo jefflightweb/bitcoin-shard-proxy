@@ -45,6 +45,7 @@ import (
 	prometheusexporter "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
@@ -197,6 +198,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	mpOpts := []sdkmetric.Option{
 		sdkmetric.WithReader(promExp),
 		sdkmetric.WithResource(res),
+		// Exemplars require a trace context per measurement and add ~11%
+		// of cumulative CPU on the hot path (aggregate.Builder.filter).
+		// shard-proxy doesn't emit traces, so they are never useful.
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
 	}
 
 	var shutdownFuncs []func(context.Context) error
