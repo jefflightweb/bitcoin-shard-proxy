@@ -27,6 +27,8 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-frag-mtu` | `FRAG_MTU` | `0` | Path MTU for BRC-130 fragmentation (0 = disabled) |  |  |  |
 | `-recv-batch` | `BSP_RECV_BATCH` | `32` | Datagrams per `recvmmsg` syscall (1 = per-packet legacy path) |  |  |  |
 | `-recv-buf-bytes` | `BSP_RECV_BUF_BYTES` | `0` | Per-worker `SO_RCVBUF` in bytes (`0` = system default; capped by `net.core.rmem_max`) |  |  |  |
+| `-ingress-dedup` | `INGRESS_DEDUP` | `true` | Enable ingress TxID dedup. `false` bypasses the dedup gate entirely — only sound for single-proxy ingest topologies. See [Ingress TxID Deduplication](#ingress-txid-deduplication) |  |  |  |
+| `-pprof` | `BSP_PPROF` | `false` | Mount `net/http/pprof` at `/debug/pprof/*` on the metrics server (profiling only) |  |  |  |
 
 ---
 
@@ -245,22 +247,32 @@ and multicasting. A two-tier claim store is consulted on every BRC-124/128
 (V2), BRC-131 block (V4), BRC-132 subtree data (V5), and BRC-134 anchor (V6)
 frame. Legacy BRC-12 (V1) frames bypass the gate.
 
-- **Tier 1** — in-process LRU keyed by TxID. Memory bounded by
-  `-txid-dedup-local-cap` (default 1 048 576 entries, ~50 MiB). A hit
-  short-circuits and the frame is dropped without contacting Redis.
+- **Tier 1** — in-process LRU keyed by TxID, sharded across 64 stripes
+  (each with its own mutex) to keep the dedup path from serialising all
+  workers. Memory bounded by `-txid-dedup-local-cap` (default 1 048 576
+  entries, ~50 MiB). A hit short-circuits and the frame is dropped without
+  contacting Redis.
 - **Tier 2** — Redis `SETNX EX`. Activated only when
   `-txid-dedup-redis-addr` is non-empty. On a tier-1 miss the proxy claims
   `<prefix><hex-txid>` in Redis; on win it forwards, on loss it drops.
   Errors fail open (frame is forwarded; a metric is recorded).
 
+The whole gate runs per packet, so it costs CPU. After the localSet
+sharding + direct-Prometheus counter work the dedup-on overhead is small
+(measured ~6 % fewer pps at 256 B vs dedup-off on a 25 GbE single-host
+loopback), but `-ingress-dedup=false` bypasses it entirely for
+deployments that provably never ingest duplicates (a single proxy with a
+single upstream feed). Leave it on for any multi-proxy or bridged topology.
+
 ### Flags
 
 | Flag | Env | Default | Notes |
 |------|-----|---------|-------|
+| `-ingress-dedup` | `INGRESS_DEDUP` | `true` | `false` bypasses the entire gate. Only safe for single-proxy ingest |
 | `-txid-dedup-redis-addr` | `TXID_DEDUP_REDIS_ADDR` | `""` | Empty disables tier-2 (local-only) |
 | `-txid-dedup-prefix` | `TXID_DEDUP_PREFIX` | `bsp:tx:` | Must match the local listener's `-ingress-set-prefix` for collapsed deployments |
 | `-txid-dedup-ttl` | `TXID_DEDUP_TTL` | `10m` | Range 1m – 30m typical |
-| `-txid-dedup-local-cap` | `TXID_DEDUP_LOCAL_CAP` | `1048576` | 0 disables the feature entirely |
+| `-txid-dedup-local-cap` | `TXID_DEDUP_LOCAL_CAP` | `1048576` | 0 also disables the feature; prefer `-ingress-dedup=false` for clarity |
 
 ### Topology guidance
 
