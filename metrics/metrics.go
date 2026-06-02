@@ -144,14 +144,9 @@ type Recorder struct {
 	txidClaimLost     metric.Int64Counter
 	txidClaimError    metric.Int64Counter
 
-	// Per-(iface, group) MeasurementOption cache
+	// Per-(iface, group) prometheus.Counter pair cache — used by
+	// flowCounters() for [packets, bytes] handles.
 	attrCache sync.Map
-
-	// Per-(iface, worker) MeasurementOption cache — hot path.
-	// Each (iface, workerID) combination is small (1 iface × NumWorkers)
-	// so the cache stays bounded; the first packet for each pair allocates
-	// the option, all subsequent packets do a single Load.
-	workerIfaceCache sync.Map
 
 	// draining is set to true when a shutdown signal has been received and the
 	// proxy is waiting for the load-balancer to stop routing new connections.
