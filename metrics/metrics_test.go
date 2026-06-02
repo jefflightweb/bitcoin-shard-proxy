@@ -104,24 +104,23 @@ func TestWorkerReadyDone(t *testing.T) {
 	}
 }
 
-// ── flowOpt cache ─────────────────────────────────────────────────────────────
+// ── flowCounters cache ────────────────────────────────────────────────────────
 
-func TestFlowOptCacheHit(t *testing.T) {
+func TestFlowCountersCacheHit(t *testing.T) {
 	rec := newTestRecorder(t, 1)
-	opt1 := rec.flowOpt("eth0", 7)
-	opt2 := rec.flowOpt("eth0", 7)
-	// Both calls must return the identical value (pointer equality on interface).
-	if opt1 != opt2 {
-		t.Error("flowOpt returned different values for same key; cache miss on second call")
+	p1, b1 := rec.flowCounters("eth0", 7)
+	p2, b2 := rec.flowCounters("eth0", 7)
+	if p1 != p2 || b1 != b2 {
+		t.Error("flowCounters returned different handles for same key; cache miss on second call")
 	}
 }
 
-func TestFlowOptCacheMiss(t *testing.T) {
+func TestFlowCountersCacheMiss(t *testing.T) {
 	rec := newTestRecorder(t, 1)
-	opt1 := rec.flowOpt("eth0", 1)
-	opt2 := rec.flowOpt("eth0", 2)
-	if opt1 == opt2 {
-		t.Error("flowOpt returned same value for different groups")
+	p1, _ := rec.flowCounters("eth0", 1)
+	p2, _ := rec.flowCounters("eth0", 2)
+	if p1 == p2 {
+		t.Error("flowCounters returned same handle for different groups")
 	}
 }
 

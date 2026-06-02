@@ -36,6 +36,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // mounts /debug/pprof/* on http.DefaultServeMux; gated by Serve(pprof=true)
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,11 +69,21 @@ type ifaceGroupKey struct {
 }
 
 // workerIfaceKey is the composite cache key for per-(interface, worker)
-// OTel MeasurementOption values used by the hot-path ingress/egress
-// counters.
+// hot-path Prometheus counter handles.
 type workerIfaceKey struct {
 	iface  string
 	worker int
+}
+
+// hotPathCounters bundles the pre-bound prometheus.Counter handles for a
+// single (iface, worker) tuple. One lookup at startup of a flow gets all
+// six in O(1).
+type hotPathCounters struct {
+	rxPackets promclient.Counter
+	rxBytes   promclient.Counter
+	txPackets promclient.Counter
+	txBytes   promclient.Counter
+	rxSize    promclient.Observer // histogram observer
 }
 
 // Recorder holds all pre-allocated OTel instrument handles and readiness
@@ -86,21 +97,32 @@ type Recorder struct {
 	startTime   time.Time
 	readyCount  atomic.Int32
 
-	// Per-packet ingress — labels: worker, iface
-	rxPackets  metric.Int64Counter
-	rxBytes    metric.Int64Counter
-	rxDrops    metric.Int64Counter
-	rxSizeHist metric.Int64Histogram
+	// ── Hot-path metrics — direct prometheus client_golang ──
+	// OTel SDK Add() was profiled at ~⅓ of total CPU on the 256 B Bitcoin
+	// hot path. Direct Prometheus skips attribute hashing, exemplar
+	// filtering, aggregation pipeline, allocator churn. shard-proxy never
+	// used OTel beyond Prometheus scraping, so the SDK was pure overhead.
 
-	// Per-packet egress — labels: worker, iface
-	txPackets     metric.Int64Counter
-	txBytes       metric.Int64Counter
-	txEgressErrs  metric.Int64Counter
-	txIngressErrs metric.Int64Counter
+	// Per-packet ingress — labels: worker, iface (worker, network_interface_name).
+	promRxPackets *promclient.CounterVec
+	promRxBytes   *promclient.CounterVec
+	promRxDrops   *promclient.CounterVec // also labelled by reason
+	promRxSize    *promclient.HistogramVec
 
-	// Per-flow / per-group — labels: iface, group (no worker dimension)
-	flowPackets metric.Int64Counter
-	flowBytes   metric.Int64Counter
+	// Per-packet egress — labels: worker, iface.
+	promTxPackets     *promclient.CounterVec
+	promTxBytes       *promclient.CounterVec
+	promTxEgressErrs  *promclient.CounterVec
+	promTxIngressErrs *promclient.CounterVec
+
+	// Per-flow / per-group — labels: iface, group (no worker dimension).
+	promFlowPackets *promclient.CounterVec
+	promFlowBytes   *promclient.CounterVec
+
+	// Per-(iface, worker) child-counter cache. Each hot-path Recorder method
+	// looks up a struct of pre-bound prometheus.Counter handles, avoiding
+	// the WithLabelValues lookup on every packet.
+	hotPathCache sync.Map // workerIfaceKey -> *hotPathCounters
 
 	// Active group tracking — iface → set of group indices
 	activeGroupsMu sync.Mutex
@@ -248,46 +270,59 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 	meter := mp.Meter(ServiceName)
 
-	if r.rxPackets, err = meter.Int64Counter("bsp_packets_received_total",
-		metric.WithDescription("Datagrams received")); err != nil {
-		return nil, err
-	}
-	if r.rxBytes, err = meter.Int64Counter("bsp_bytes_received_total",
-		metric.WithDescription("Raw bytes received")); err != nil {
-		return nil, err
-	}
-	if r.rxDrops, err = meter.Int64Counter("bsp_packets_dropped_total",
-		metric.WithDescription("Datagrams dropped")); err != nil {
-		return nil, err
-	}
-	if r.rxSizeHist, err = meter.Int64Histogram("bsp_packet_size_bytes",
-		metric.WithDescription("Datagram size distribution"),
-		metric.WithUnit("By")); err != nil {
-		return nil, err
-	}
-	if r.txPackets, err = meter.Int64Counter("bsp_packets_forwarded_total",
-		metric.WithDescription("Datagrams successfully forwarded")); err != nil {
-		return nil, err
-	}
-	if r.txBytes, err = meter.Int64Counter("bsp_bytes_forwarded_total",
-		metric.WithDescription("Raw bytes forwarded")); err != nil {
-		return nil, err
-	}
-	if r.txEgressErrs, err = meter.Int64Counter("bsp_egress_errors_total",
-		metric.WithDescription("WriteTo errors on egress socket")); err != nil {
-		return nil, err
-	}
-	if r.txIngressErrs, err = meter.Int64Counter("bsp_ingress_errors_total",
-		metric.WithDescription("ReadFrom non-fatal errors on ingress socket")); err != nil {
-		return nil, err
-	}
-	if r.flowPackets, err = meter.Int64Counter("bsp_flow_packets_total",
-		metric.WithDescription("Packets per shard group per interface (active groups only)")); err != nil {
-		return nil, err
-	}
-	if r.flowBytes, err = meter.Int64Counter("bsp_flow_bytes_total",
-		metric.WithDescription("Bytes per shard group per interface (active groups only)")); err != nil {
-		return nil, err
+	// Hot-path metrics: direct prometheus client_golang. Same names and
+	// label sets as the previous OTel int64Counter exposure so dashboards
+	// keep working.
+	r.promRxPackets = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_packets_received_total",
+		Help: "Datagrams received",
+	}, []string{"worker", "network_interface_name"})
+	r.promRxBytes = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_bytes_received_total",
+		Help: "Raw bytes received",
+	}, []string{"worker", "network_interface_name"})
+	r.promRxDrops = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_packets_dropped_total",
+		Help: "Datagrams dropped",
+	}, []string{"worker", "network_interface_name", "reason"})
+	r.promRxSize = promclient.NewHistogramVec(promclient.HistogramOpts{
+		Name:    "bsp_packet_size_bytes",
+		Help:    "Datagram size distribution",
+		Buckets: promclient.ExponentialBuckets(64, 2, 12), // 64 B .. 256 KiB
+	}, []string{"worker", "network_interface_name"})
+	r.promTxPackets = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_packets_forwarded_total",
+		Help: "Datagrams successfully forwarded",
+	}, []string{"worker", "network_interface_name"})
+	r.promTxBytes = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_bytes_forwarded_total",
+		Help: "Raw bytes forwarded",
+	}, []string{"worker", "network_interface_name"})
+	r.promTxEgressErrs = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_egress_errors_total",
+		Help: "WriteTo errors on egress socket",
+	}, []string{"worker", "network_interface_name"})
+	r.promTxIngressErrs = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_ingress_errors_total",
+		Help: "ReadFrom non-fatal errors on ingress socket",
+	}, []string{"worker", "network_interface_name"})
+	r.promFlowPackets = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_flow_packets_total",
+		Help: "Packets per shard group per interface (active groups only)",
+	}, []string{"network_interface_name", "group"})
+	r.promFlowBytes = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_flow_bytes_total",
+		Help: "Bytes per shard group per interface (active groups only)",
+	}, []string{"network_interface_name", "group"})
+	for _, c := range []promclient.Collector{
+		r.promRxPackets, r.promRxBytes, r.promRxDrops, r.promRxSize,
+		r.promTxPackets, r.promTxBytes,
+		r.promTxEgressErrs, r.promTxIngressErrs,
+		r.promFlowPackets, r.promFlowBytes,
+	} {
+		if err := reg.Register(c); err != nil {
+			return nil, fmt.Errorf("metrics: register hot-path counter: %w", err)
+		}
 	}
 
 	// Observable gauge: distinct active group count per interface.
@@ -381,43 +416,39 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 // PacketReceived records receipt of a raw datagram on the ingress socket.
 func (r *Recorder) PacketReceived(iface string, workerID int, size int) {
-	opt := r.workerIfaceOptCached(iface, workerID)
-	ctx := context.Background()
-	r.rxPackets.Add(ctx, 1, opt)
-	r.rxBytes.Add(ctx, int64(size), opt)
-	r.rxSizeHist.Record(ctx, int64(size), opt)
+	c := r.hotPath(iface, workerID)
+	c.rxPackets.Inc()
+	c.rxBytes.Add(float64(size))
+	c.rxSize.Observe(float64(size))
 }
 
 // PacketDropped records a dropped datagram.
 // reason must be one of: "decode_error", "write_error".
 func (r *Recorder) PacketDropped(iface string, workerID int, reason string) {
-	r.rxDrops.Add(context.Background(), 1,
-		metric.WithAttributes(
-			attribute.Int("worker", workerID),
-			ifaceAttr(iface),
-			attribute.String("reason", reason),
-		),
-	)
+	r.promRxDrops.WithLabelValues(strconv.Itoa(workerID), iface, reason).Inc()
 }
 
 // PacketForwarded records a successfully forwarded datagram.
 func (r *Recorder) PacketForwarded(iface string, workerID int, groupIdx uint32, size int) {
-	ctx := context.Background()
-	opt := r.workerIfaceOptCached(iface, workerID)
-	r.txPackets.Add(ctx, 1, opt)
-	r.txBytes.Add(ctx, int64(size), opt)
+	c := r.hotPath(iface, workerID)
+	c.txPackets.Inc()
+	c.txBytes.Add(float64(size))
 
-	fopt := r.flowOpt(iface, groupIdx)
-	r.flowPackets.Add(ctx, 1, fopt)
-	r.flowBytes.Add(ctx, int64(size), fopt)
+	fp, fb := r.flowCounters(iface, groupIdx)
+	fp.Inc()
+	fb.Add(float64(size))
 
 	r.trackGroup(iface, groupIdx)
 }
 
 // FrameFragmented records one frame that exceeded the fragmentation threshold.
-// k is the number of fragments it was split into.
+// k is the number of fragments it was split into. Not a per-packet hot path
+// (only fires for > MTU frames) so still uses OTel.
 func (r *Recorder) FrameFragmented(workerID int, k int) {
-	opt := r.workerIfaceOptCached("", workerID)
+	opt := metric.WithAttributes(
+		attribute.Int("worker", workerID),
+		ifaceAttr(""),
+	)
 	ctx := context.Background()
 	r.framesFragmented.Add(ctx, 1, opt)
 	r.fragmentsEmitted.Add(ctx, int64(k), opt)
@@ -484,12 +515,12 @@ func (r *Recorder) TCPBytesReceived(n int) {
 
 // IngressError records a non-fatal ReadFrom error on the ingress socket.
 func (r *Recorder) IngressError(iface string, workerID int) {
-	r.txIngressErrs.Add(context.Background(), 1, r.workerIfaceOptCached(iface, workerID))
+	r.promTxIngressErrs.WithLabelValues(strconv.Itoa(workerID), iface).Inc()
 }
 
 // EgressError records a WriteTo error on the egress socket.
 func (r *Recorder) EgressError(iface string, workerID int) {
-	r.txEgressErrs.Add(context.Background(), 1, r.workerIfaceOptCached(iface, workerID))
+	r.promTxEgressErrs.WithLabelValues(strconv.Itoa(workerID), iface).Inc()
 }
 
 // WorkerReady signals that a worker has bound its sockets and entered its
@@ -606,44 +637,47 @@ func ifaceAttr(iface string) attribute.KeyValue {
 	return attribute.String("network.interface.name", iface)
 }
 
-// workerIfaceOpt returns a per-(iface, worker) MeasurementOption, allocating
-// once and caching for subsequent calls. The cache lives on the Recorder
-// because hot-path Add() calls need zero allocation; the bare function
-// remains for callers that don't have a Recorder pointer (legacy / tests).
-func workerIfaceOpt(iface string, workerID int) metric.MeasurementOption {
-	return metric.WithAttributes(
-		attribute.Int("worker", workerID),
-		ifaceAttr(iface),
-	)
-}
-
-// workerIfaceOptCached is the hot-path accessor. First call for a (iface,
-// workerID) pair allocates the MeasurementOption and stores it; subsequent
-// calls are one sync.Map Load, no allocation.
-func (r *Recorder) workerIfaceOptCached(iface string, workerID int) metric.MeasurementOption {
+// hotPath returns the cached bundle of prometheus.Counter handles for an
+// (iface, worker) tuple. First call binds + stores; subsequent calls are
+// one sync.Map Load. WithLabelValues internally uses a label-keyed map;
+// caching the resulting Counter handles avoids that lookup per packet.
+func (r *Recorder) hotPath(iface string, workerID int) *hotPathCounters {
 	key := workerIfaceKey{iface: iface, worker: workerID}
-	if v, ok := r.workerIfaceCache.Load(key); ok {
-		return v.(metric.MeasurementOption)
+	if v, ok := r.hotPathCache.Load(key); ok {
+		return v.(*hotPathCounters)
 	}
-	opt := workerIfaceOpt(iface, workerID)
-	r.workerIfaceCache.Store(key, opt)
-	return opt
+	w := strconv.Itoa(workerID)
+	c := &hotPathCounters{
+		rxPackets: r.promRxPackets.WithLabelValues(w, iface),
+		rxBytes:   r.promRxBytes.WithLabelValues(w, iface),
+		txPackets: r.promTxPackets.WithLabelValues(w, iface),
+		txBytes:   r.promTxBytes.WithLabelValues(w, iface),
+		rxSize:    r.promRxSize.WithLabelValues(w, iface),
+	}
+	if actual, loaded := r.hotPathCache.LoadOrStore(key, c); loaded {
+		return actual.(*hotPathCounters)
+	}
+	return c
 }
 
-// flowOpt returns a cached MeasurementOption for per-(iface, group) flow
-// instruments. The first call for a given key allocates and stores the option;
-// all subsequent calls perform a single sync.Map Load — zero allocation.
-func (r *Recorder) flowOpt(iface string, groupIdx uint32) metric.MeasurementOption {
+// flowCounters returns the (packets, bytes) prometheus.Counter handles for a
+// per-(iface, group) flow, cached the same way as hotPath.
+func (r *Recorder) flowCounters(iface string, groupIdx uint32) (promclient.Counter, promclient.Counter) {
 	key := ifaceGroupKey{iface: iface, group: groupIdx}
 	if v, ok := r.attrCache.Load(key); ok {
-		return v.(metric.MeasurementOption)
+		pair := v.([2]promclient.Counter)
+		return pair[0], pair[1]
 	}
-	opt := metric.WithAttributes(
-		ifaceAttr(iface),
-		attribute.String("group", fmt.Sprintf("%04x", groupIdx)),
-	)
-	r.attrCache.Store(key, opt)
-	return opt
+	groupStr := fmt.Sprintf("%04x", groupIdx)
+	pair := [2]promclient.Counter{
+		r.promFlowPackets.WithLabelValues(iface, groupStr),
+		r.promFlowBytes.WithLabelValues(iface, groupStr),
+	}
+	if actual, loaded := r.attrCache.LoadOrStore(key, pair); loaded {
+		p := actual.([2]promclient.Counter)
+		return p[0], p[1]
+	}
+	return pair[0], pair[1]
 }
 
 // trackGroup records that groupIdx was observed on iface.
