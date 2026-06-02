@@ -119,7 +119,9 @@ type Config struct {
 	// proxy when a TxID arrived via a path the proxy itself did not see.
 	//
 	// TxidDedupRedisAddr empty → tier-2 disabled; only the local LRU is used.
-	// TxidDedupLocalCap=0 → dedup feature disabled entirely.
+	// TxidDedupEnabled=false → dedup feature disabled entirely (overrides
+	// TxidDedupLocalCap). Off-path is one nil check per packet.
+	TxidDedupEnabled   bool
 	TxidDedupRedisAddr string
 	TxidDedupPrefix    string
 	TxidDedupTTL       time.Duration
@@ -181,6 +183,8 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.PprofEnabled, "pprof", envBool("BSP_PPROF", false),
 		"expose net/http/pprof at /debug/pprof/* on the metrics server (profiling only)")
 
+	flag.BoolVar(&c.TxidDedupEnabled, "ingress-dedup", envBool("INGRESS_DEDUP", true),
+		"enable ingress TxID dedup (false = bypass entirely; measured ~17% CPU at high pps with no-Redis local-only LRU)")
 	flag.StringVar(&c.TxidDedupRedisAddr, "txid-dedup-redis-addr", envStr("TXID_DEDUP_REDIS_ADDR", ""),
 		"Redis address for ingress TxID dedup (empty = local-only tier-1 LRU)")
 	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", "bsp:tx:"),

@@ -157,9 +157,9 @@ func main() {
 	}
 
 	// Optional ingress TxID dedup. Two-tier (local LRU → Redis SETNX).
-	// LocalCap=0 disables the feature entirely.
+	// -ingress-dedup=false or TxidDedupLocalCap=0 disables the feature.
 	var txStore *txidset.Store
-	if cfg.TxidDedupLocalCap > 0 {
+	if cfg.TxidDedupEnabled && cfg.TxidDedupLocalCap > 0 {
 		txStore, err = txidset.New(txidset.Config{
 			RedisAddr:     cfg.TxidDedupRedisAddr,
 			TTL:           cfg.TxidDedupTTL,
