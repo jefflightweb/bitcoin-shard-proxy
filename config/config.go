@@ -100,6 +100,10 @@ type Config struct {
 	// kernel clamps to net.core.rmem_max. 0 = use the worker package default.
 	RecvBufBytes int
 
+	// PprofEnabled mounts net/http/pprof at /debug/pprof/* on the metrics
+	// server. Off by default; turn on only for profiling sessions.
+	PprofEnabled bool
+
 	// Observability
 	MetricsAddr  string        // HTTP bind address for /metrics, /healthz, /readyz
 	InstanceID   string        // OTel service.instance.id for federation; defaults to hostname
@@ -174,6 +178,8 @@ func Load() (*Config, error) {
 		"datagrams per recvmmsg syscall (1 = per-packet legacy path; 32 default)")
 	flag.IntVar(&c.RecvBufBytes, "recv-buf-bytes", envInt("BSP_RECV_BUF_BYTES", 0),
 		"per-worker SO_RCVBUF in bytes (0 = worker default; capped by net.core.rmem_max)")
+	flag.BoolVar(&c.PprofEnabled, "pprof", envBool("BSP_PPROF", false),
+		"expose net/http/pprof at /debug/pprof/* on the metrics server (profiling only)")
 
 	flag.StringVar(&c.TxidDedupRedisAddr, "txid-dedup-redis-addr", envStr("TXID_DEDUP_REDIS_ADDR", ""),
 		"Redis address for ingress TxID dedup (empty = local-only tier-1 LRU)")

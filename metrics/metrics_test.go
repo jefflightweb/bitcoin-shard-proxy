@@ -276,7 +276,7 @@ func TestServeMetricsEndpoint(t *testing.T) {
 	done := make(chan struct{})
 
 	// Start the server in the background and give it a moment to bind.
-	go rec.Serve("127.0.0.1:0", done)
+	go rec.Serve("127.0.0.1:0", false, done)
 	// We cannot easily get the ephemeral port from Serve as-is, so instead
 	// we test the handler directly via httptest to avoid port-binding races.
 	mux := http.NewServeMux()
@@ -316,7 +316,7 @@ func TestServeBadAddr(t *testing.T) {
 	done := make(chan struct{})
 	// Pass an invalid address so ListenAndServe errors immediately.
 	// Serve must not panic and must unblock when done is closed.
-	go rec.Serve("invalid-address-!!", done)
+	go rec.Serve("invalid-address-!!", false, done)
 	// Give the goroutine time to attempt binding and log the error.
 	time.Sleep(50 * time.Millisecond)
 	close(done)
@@ -331,7 +331,7 @@ func TestServeShutdownError(t *testing.T) {
 	// Start Serve on a valid addr, then close done quickly so the HTTP server
 	// shuts down. The srv.Shutdown path (including the warn branch) is exercised
 	// when done is closed while the server is still running normally.
-	go rec.Serve("127.0.0.1:0", done)
+	go rec.Serve("127.0.0.1:0", false, done)
 	time.Sleep(30 * time.Millisecond)
 	close(done)
 	time.Sleep(50 * time.Millisecond)

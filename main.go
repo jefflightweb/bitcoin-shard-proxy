@@ -185,7 +185,7 @@ func main() {
 	var wg sync.WaitGroup
 
 	// Start the metrics HTTP server (blocks on done; shuts down gracefully).
-	go rec.Serve(cfg.MetricsAddr, done)
+	go rec.Serve(cfg.MetricsAddr, cfg.PprofEnabled, done)
 
 	for i := range cfg.NumWorkers {
 		w := worker.New(i, fwd, ifaces, rec)

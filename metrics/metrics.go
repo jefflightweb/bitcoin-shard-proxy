@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // mounts /debug/pprof/* on http.DefaultServeMux; gated by Serve(pprof=true)
 	"os"
 	"sync"
 	"sync/atomic"
@@ -626,11 +627,19 @@ func (r *Recorder) trackGroup(iface string, groupIdx uint32) {
 // Serve starts the HTTP server on addr, registering /metrics, /healthz, and
 // /readyz. It blocks until done is closed, then gracefully shuts down the
 // HTTP server with a 5-second deadline.
-func (r *Recorder) Serve(addr string, done <-chan struct{}) {
+//
+// When pprof is true, net/http/pprof handlers are mounted at /debug/pprof/*
+// for profiling sessions. Leave off in production.
+func (r *Recorder) Serve(addr string, pprof bool, done <-chan struct{}) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", r.handleHealthz)
 	mux.HandleFunc("/readyz", r.handleReadyz)
+	if pprof {
+		// Importing net/http/pprof registers the handlers on
+		// http.DefaultServeMux as a side effect; re-export them on our mux.
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	}
 
 	srv := &http.Server{
 		Addr:    addr,
