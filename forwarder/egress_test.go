@@ -154,6 +154,22 @@ func TestFlush_ResetsQueuesAndMeta(t *testing.T) {
 	}
 }
 
+// TestRecordWrite_NegativeSent guards the egress crash where WriteBatch
+// returns -1 (sendmmsg failed before any send, e.g. "network is unreachable")
+// and recordWrite indexed e.meta[-1]. sent must be clamped to [0,len(meta)].
+func TestRecordWrite_NegativeSent(t *testing.T) {
+	fw := makeForwarder()
+	c, _ := openLoopbackUDP(t)
+	egr := recEgress(t, fw, c)
+	dst := net.UDPAddr{IP: net.ParseIP("ff05::b:1"), Port: 9001}
+	egr.EnqueueData([]byte("a"), dst, 1, 0)
+	egr.EnqueueData([]byte("b"), dst, 1, 0)
+	// Must not panic: -1 (pre-send failure) and an oversized count are both
+	// out-of-range relative to meta.
+	egr.recordWrite(0, -1, net.ErrClosed)
+	egr.recordWrite(0, len(egr.meta)+5, nil)
+}
+
 func TestFlush_MultipleCycles_QueueGrowthBounded(t *testing.T) {
 	// Append/Flush/Append should reuse the underlying msgs[i] backing
 	// arrays — capacity must not grow unboundedly across cycles.

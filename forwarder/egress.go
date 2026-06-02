@@ -194,11 +194,18 @@ func (e *Egress) Flush() {
 }
 
 // recordWrite fires the per-target metrics for one WriteBatch result. sent
-// is the count returned by WriteBatch (0 on error); meta[0:sent] count as
-// forwarded, meta[sent:] as write-error drops.
+// is the count returned by WriteBatch; meta[0:sent] count as forwarded,
+// meta[sent:] as write-error drops. WriteBatch returns -1 (not 0) when the
+// underlying sendmmsg fails before any message is written, so sent is
+// clamped to [0, len(meta)] to keep both loops in bounds.
 func (e *Egress) recordWrite(targetIdx, sent int, err error) {
 	if e.rec == nil {
 		return
+	}
+	if sent < 0 {
+		sent = 0
+	} else if sent > len(e.meta) {
+		sent = len(e.meta)
 	}
 	iface := e.targets[targetIdx].Iface.Name
 	if err != nil {
