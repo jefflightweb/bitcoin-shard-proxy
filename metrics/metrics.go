@@ -66,6 +66,14 @@ type ifaceGroupKey struct {
 	group uint32
 }
 
+// workerIfaceKey is the composite cache key for per-(interface, worker)
+// OTel MeasurementOption values used by the hot-path ingress/egress
+// counters.
+type workerIfaceKey struct {
+	iface  string
+	worker int
+}
+
 // Recorder holds all pre-allocated OTel instrument handles and readiness
 // state. Construct with [New]; pass the pointer to every worker.
 type Recorder struct {
@@ -115,6 +123,12 @@ type Recorder struct {
 
 	// Per-(iface, group) MeasurementOption cache
 	attrCache sync.Map
+
+	// Per-(iface, worker) MeasurementOption cache — hot path.
+	// Each (iface, workerID) combination is small (1 iface × NumWorkers)
+	// so the cache stays bounded; the first packet for each pair allocates
+	// the option, all subsequent packets do a single Load.
+	workerIfaceCache sync.Map
 
 	// draining is set to true when a shutdown signal has been received and the
 	// proxy is waiting for the load-balancer to stop routing new connections.
@@ -362,7 +376,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 // PacketReceived records receipt of a raw datagram on the ingress socket.
 func (r *Recorder) PacketReceived(iface string, workerID int, size int) {
-	opt := workerIfaceOpt(iface, workerID)
+	opt := r.workerIfaceOptCached(iface, workerID)
 	ctx := context.Background()
 	r.rxPackets.Add(ctx, 1, opt)
 	r.rxBytes.Add(ctx, int64(size), opt)
@@ -384,7 +398,7 @@ func (r *Recorder) PacketDropped(iface string, workerID int, reason string) {
 // PacketForwarded records a successfully forwarded datagram.
 func (r *Recorder) PacketForwarded(iface string, workerID int, groupIdx uint32, size int) {
 	ctx := context.Background()
-	opt := workerIfaceOpt(iface, workerID)
+	opt := r.workerIfaceOptCached(iface, workerID)
 	r.txPackets.Add(ctx, 1, opt)
 	r.txBytes.Add(ctx, int64(size), opt)
 
@@ -398,7 +412,7 @@ func (r *Recorder) PacketForwarded(iface string, workerID int, groupIdx uint32, 
 // FrameFragmented records one frame that exceeded the fragmentation threshold.
 // k is the number of fragments it was split into.
 func (r *Recorder) FrameFragmented(workerID int, k int) {
-	opt := workerIfaceOpt("", workerID)
+	opt := r.workerIfaceOptCached("", workerID)
 	ctx := context.Background()
 	r.framesFragmented.Add(ctx, 1, opt)
 	r.fragmentsEmitted.Add(ctx, int64(k), opt)
@@ -465,12 +479,12 @@ func (r *Recorder) TCPBytesReceived(n int) {
 
 // IngressError records a non-fatal ReadFrom error on the ingress socket.
 func (r *Recorder) IngressError(iface string, workerID int) {
-	r.txIngressErrs.Add(context.Background(), 1, workerIfaceOpt(iface, workerID))
+	r.txIngressErrs.Add(context.Background(), 1, r.workerIfaceOptCached(iface, workerID))
 }
 
 // EgressError records a WriteTo error on the egress socket.
 func (r *Recorder) EgressError(iface string, workerID int) {
-	r.txEgressErrs.Add(context.Background(), 1, workerIfaceOpt(iface, workerID))
+	r.txEgressErrs.Add(context.Background(), 1, r.workerIfaceOptCached(iface, workerID))
 }
 
 // WorkerReady signals that a worker has bound its sockets and entered its
@@ -587,11 +601,28 @@ func ifaceAttr(iface string) attribute.KeyValue {
 	return attribute.String("network.interface.name", iface)
 }
 
+// workerIfaceOpt returns a per-(iface, worker) MeasurementOption, allocating
+// once and caching for subsequent calls. The cache lives on the Recorder
+// because hot-path Add() calls need zero allocation; the bare function
+// remains for callers that don't have a Recorder pointer (legacy / tests).
 func workerIfaceOpt(iface string, workerID int) metric.MeasurementOption {
 	return metric.WithAttributes(
 		attribute.Int("worker", workerID),
 		ifaceAttr(iface),
 	)
+}
+
+// workerIfaceOptCached is the hot-path accessor. First call for a (iface,
+// workerID) pair allocates the MeasurementOption and stores it; subsequent
+// calls are one sync.Map Load, no allocation.
+func (r *Recorder) workerIfaceOptCached(iface string, workerID int) metric.MeasurementOption {
+	key := workerIfaceKey{iface: iface, worker: workerID}
+	if v, ok := r.workerIfaceCache.Load(key); ok {
+		return v.(metric.MeasurementOption)
+	}
+	opt := workerIfaceOpt(iface, workerID)
+	r.workerIfaceCache.Store(key, opt)
+	return opt
 }
 
 // flowOpt returns a cached MeasurementOption for per-(iface, group) flow
