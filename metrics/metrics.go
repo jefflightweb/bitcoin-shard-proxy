@@ -52,6 +52,8 @@ import (
 	promclient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/lightwebinc/shard-common/logging"
 )
 
 // ServiceName is the OTel service.name resource attribute value.
@@ -93,6 +95,7 @@ type Recorder struct {
 	promReg     promclient.Gatherer
 	promOtelReg *promclient.Registry
 	runtimeReg  *promclient.Registry
+	levelVar    *slog.LevelVar
 	numWorkers  int
 	startTime   time.Time
 	readyCount  atomic.Int32
@@ -704,6 +707,9 @@ func (r *Recorder) Serve(addr string, pprof bool, done <-chan struct{}) {
 	mux.Handle("/metrics", promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", r.handleHealthz)
 	mux.HandleFunc("/readyz", r.handleReadyz)
+	if r.levelVar != nil {
+		mux.HandleFunc("/loglevel", logging.LevelHandler(r.levelVar))
+	}
 	if pprof {
 		// Importing net/http/pprof registers the handlers on
 		// http.DefaultServeMux as a side effect; re-export them on our mux.

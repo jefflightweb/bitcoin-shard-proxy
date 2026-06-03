@@ -141,10 +141,18 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 
 	// Enlarge the receive buffer to absorb bursts of transaction datagrams.
 	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, w.recvBufBytes); err != nil {
-		w.log.Warn("could not set SO_RCVBUF", "err", err)
+		w.log.Warn("could not set SO_RCVBUF", "err", err, "requested_bytes", w.recvBufBytes)
 	}
 	if actual, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF); err == nil {
-		w.log.Debug("SO_RCVBUF", "requested_bytes", w.recvBufBytes, "actual_bytes", actual)
+		// The kernel returns 2x the effective size and silently clamps to
+		// net.core.rmem_max. A clamp below the request is an operational
+		// condition (undersized rmem_max) worth surfacing (category-8).
+		if actual < w.recvBufBytes {
+			w.log.Warn("SO_RCVBUF clamped below request; raise net.core.rmem_max",
+				"requested_bytes", w.recvBufBytes, "actual_bytes", actual)
+		} else {
+			w.log.Debug("SO_RCVBUF", "requested_bytes", w.recvBufBytes, "actual_bytes", actual)
+		}
 	}
 
 	sa := &unix.SockaddrInet6{Port: listenPort}

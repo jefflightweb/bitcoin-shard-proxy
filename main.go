@@ -59,8 +59,11 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/cache"
+	"github.com/lightwebinc/shard-common/hostinfo"
+	"github.com/lightwebinc/shard-common/logging"
 	commanifest "github.com/lightwebinc/shard-common/manifest"
 	"github.com/lightwebinc/shard-common/shard"
+	"github.com/lightwebinc/shard-common/tracing"
 	"github.com/lightwebinc/shard-common/txidset"
 	"github.com/lightwebinc/shard-proxy/config"
 	"github.com/lightwebinc/shard-proxy/forwarder"
@@ -93,14 +96,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialise the structured logger. Debug level enables per-packet output.
-	logLevel := slog.LevelInfo
+	// Initialise the unified structured logger. -debug is a deprecated alias
+	// that forces debug level.
+	logLevel := logging.ParseLevel(cfg.LogLevel)
 	if cfg.Debug {
 		logLevel = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	})))
+	levelVar := logging.Init(logging.Options{
+		Service:    metrics.ServiceName,
+		InstanceID: cfg.InstanceID,
+		Version:    metrics.Version,
+		Level:      logLevel,
+		Format:     logging.ParseFormat(cfg.LogFormat),
+	})
+	logging.InstallSIGHUPToggle(levelVar, logLevel)
 
 	// Resolve all egress interfaces once; workers share the []*net.Interface slice.
 	ifaces := make([]*net.Interface, 0, len(cfg.EgressIfaces))
@@ -119,6 +128,31 @@ func main() {
 		slog.Error("metrics init failed", "err", err)
 		os.Exit(1)
 	}
+	rec.SetLevelVar(levelVar)
+
+	// One-shot host inventory: emit the descriptive payload as a log event and
+	// mirror the slim numerics as the bsp_host_info gauge for dashboard joins.
+	inv := hostinfo.Gather(metrics.ServiceName, metrics.Version)
+	rec.SetHostInfo(inv)
+	slog.Info("host.inventory", "inventory", inv)
+
+	// Opt-in distributed tracing (no-op unless -trace-sampling > 0 with an OTLP
+	// endpoint). Control-plane only; never wired into the forwarder hot path.
+	_, traceShutdown, terr := tracing.Init(context.Background(), tracing.Options{
+		Service:      metrics.ServiceName,
+		InstanceID:   cfg.InstanceID,
+		Version:      metrics.Version,
+		OTLPEndpoint: cfg.OTLPEndpoint,
+		Sampling:     cfg.TraceSampling,
+	})
+	if terr != nil {
+		slog.Warn("tracing init failed; continuing without traces", "err", terr)
+	}
+	defer func() {
+		tctx, tcancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer tcancel()
+		_ = traceShutdown(tctx)
+	}()
 
 	// Construct the shard engine. It is immutable and safe for concurrent use.
 	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)

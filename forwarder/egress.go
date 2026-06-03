@@ -10,13 +10,17 @@
 package forwarder
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
+	"time"
 
 	"golang.org/x/net/ipv6"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/logging"
 	"github.com/lightwebinc/shard-proxy/metrics"
 )
 
@@ -47,6 +51,10 @@ type Egress struct {
 
 	log *slog.Logger
 	rec *metrics.Recorder
+
+	// throttle bounds category-8 OS/NIC egress-error logs to log-once-then-count
+	// per interface, so a sustained ENOBUFS storm cannot itself become an outage.
+	throttle *logging.Throttle
 }
 
 // msgMeta carries the per-message attributes needed to fire metrics at Flush
@@ -68,12 +76,13 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 		batchHint = 1
 	}
 	e := &Egress{
-		targets: targets,
-		pcs:     make([]*ipv6.PacketConn, len(targets)),
-		msgs:    make([][]ipv6.Message, len(targets)),
-		meta:    make([]msgMeta, 0, batchHint),
-		log:     slog.Default().With("component", "egress"),
-		rec:     rec,
+		targets:  targets,
+		pcs:      make([]*ipv6.PacketConn, len(targets)),
+		msgs:     make([][]ipv6.Message, len(targets)),
+		meta:     make([]msgMeta, 0, batchHint),
+		log:      slog.Default().With("component", "egress"),
+		rec:      rec,
+		throttle: logging.NewThrottle(5 * time.Second),
 	}
 	for i, tgt := range targets {
 		if tgt.PC != nil {
@@ -178,7 +187,7 @@ func (e *Egress) Flush() {
 		}
 		sent, err := e.pcs[i].WriteBatch(e.msgs[i], 0)
 		if err != nil {
-			e.log.Warn("WriteBatch error", "iface", e.targets[i].Iface.Name, "err", err)
+			e.logWriteError(i, len(e.msgs[i]), sent, err)
 		}
 		e.recordWrite(i, sent, err)
 		// Clear slice contents to drop references to pooled buffers /
@@ -191,6 +200,46 @@ func (e *Egress) Flush() {
 	}
 	e.pooledBufs = e.pooledBufs[:0]
 	e.meta = e.meta[:0]
+}
+
+// logWriteError emits a category-8 (OS/NIC) log for a WriteBatch failure,
+// classifying the kernel errno (ENOBUFS = socket buffer / qdisc backpressure)
+// and reporting how many datagrams were dropped. It is throttled per interface
+// to log-once-then-count so a sustained error storm cannot flood the log.
+func (e *Egress) logWriteError(targetIdx, queued, sent int, err error) {
+	iface := e.targets[targetIdx].Iface.Name
+	emit, suppressed := e.throttle.Allow(iface)
+	if !emit {
+		return
+	}
+	dropped := queued
+	if sent > 0 {
+		dropped = queued - sent
+	}
+	attrs := []any{
+		"iface", iface,
+		"queued", queued,
+		"dropped", dropped,
+		"err", err,
+		"suppressed", suppressed,
+	}
+	if errno, ok := errnoOf(err); ok {
+		attrs = append(attrs, "errno", errno.Error(), "syscall", "sendmmsg")
+		if errors.Is(err, syscall.ENOBUFS) {
+			e.log.Warn("egress ENOBUFS: kernel send buffer / qdisc backpressure", attrs...)
+			return
+		}
+	}
+	e.log.Warn("egress write error", attrs...)
+}
+
+// errnoOf extracts a syscall.Errno from a (possibly wrapped) error.
+func errnoOf(err error) (syscall.Errno, bool) {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno, true
+	}
+	return 0, false
 }
 
 // recordWrite fires the per-target metrics for one WriteBatch result. sent

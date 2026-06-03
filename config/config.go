@@ -105,10 +105,13 @@ type Config struct {
 	PprofEnabled bool
 
 	// Observability
-	MetricsAddr  string        // HTTP bind address for /metrics, /healthz, /readyz
-	InstanceID   string        // OTel service.instance.id for federation; defaults to hostname
-	OTLPEndpoint string        // gRPC OTLP endpoint (empty = disabled)
-	OTLPInterval time.Duration // OTLP push interval
+	MetricsAddr   string        // HTTP bind address for /metrics, /healthz, /readyz
+	InstanceID    string        // OTel service.instance.id for federation; defaults to hostname
+	OTLPEndpoint  string        // gRPC OTLP endpoint (empty = disabled)
+	OTLPInterval  time.Duration // OTLP push interval
+	LogFormat     string        // "text" (default) | "json"
+	LogLevel      string        // debug|info|warn|error
+	TraceSampling float64       // 0..1 head sampling ratio; 0 disables tracing
 
 	// TxID ingress dedup (proxy-side)
 	//
@@ -177,7 +180,13 @@ func Load() (*Config, error) {
 	groupIDFlag := flag.String("mc-group-id", envStr("MC_GROUP_ID", "0x000B"),
 		"IANA group-id (bytes 12–13 of the IPv6 multicast address); default 0x000B (IANA Bitcoin)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),
-		"enable per-packet debug logging and multicast loopback (single-host testing)")
+		"enable per-packet debug logging and multicast loopback (single-host testing); deprecated alias for -log-level=debug")
+	flag.StringVar(&c.LogFormat, "log-format", envStr("LOG_FORMAT", "text"),
+		"log output format: text (default, stderr) | json (stdout, for fleet aggregation)")
+	flag.StringVar(&c.LogLevel, "log-level", envStr("LOG_LEVEL", "info"),
+		"log level: debug|info|warn|error (overridden to debug when -debug is set)")
+	flag.Float64Var(&c.TraceSampling, "trace-sampling", envFloat("TRACE_SAMPLING", 0),
+		"distributed-trace head sampling ratio 0..1 (0 = tracing off; exports via -otlp-endpoint)")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing ingress sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.IntVar(&c.FragMTU, "frag-mtu", envInt("FRAG_MTU", 0),
@@ -388,6 +397,17 @@ func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+// envFloat returns the float value of environment variable key, or def if the
+// variable is unset, empty, or not parseable as a float.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def
