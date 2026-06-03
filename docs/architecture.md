@@ -339,6 +339,35 @@ Two adoption modes, selected by `-live-resharding`:
 Flag reference and fail-closed rules: [configuration.md](configuration.md#auto-shard-config-brc-137).
 System-level design: [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/AutoShardConfig/auto-shard-config-plan.md).
 
+## Logging & Tracing
+
+The proxy uses the shared `shard-common/logging` package: `main` calls
+`logging.Init` once, which installs a process-wide `slog` default carrying the
+`service.{name,instance.id,version}` identity triple (the same tuple the OTLP
+metrics resource attributes use, so logs and metrics join on shared
+dimensions). `-log-format json` emits one JSON object per line on stdout for
+fleet aggregation; `text` (default) is human-readable on stderr. `-log-level`
+is runtime-togglable without a restart via `POST /loglevel?level=<lvl>` on the
+metrics server and via SIGHUP (toggles debug↔configured level).
+
+At startup the proxy emits a one-shot `host.inventory` event (OS, CPU, memory,
+per-NIC facts incl. IPv4+IPv6, multicast sysctls) and mirrors the slim numerics
+as a `bsp_host_info` gauge.
+
+**Category-8 OS/NIC logs** (the kernel conditions metrics show only as counts)
+are emitted, throttled, at the syscall sites that observe them:
+
+- `forwarder/egress.go` — `Egress.Flush` classifies `WriteBatch`/`sendmmsg`
+  errors, logging `ENOBUFS` (kernel send-buffer / qdisc backpressure) with
+  errno + dropped count, throttled per interface (log-once-then-count).
+- `worker/worker.go` — warns when the kernel clamps `SO_RCVBUF` below the
+  requested size (undersized `net.core.rmem_max`).
+
+**Tracing** is opt-in (`-trace-sampling > 0` with an `-otlp-endpoint`) and
+control-plane only — the forwarder receive/send loops take no span. Export is
+out-of-process via the collector. See the
+[Unified Logging Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md).
+
 ## Package Structure
 
 ```

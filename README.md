@@ -97,6 +97,18 @@ With opt-in BRC-137 auto-shard-config (manifest-driven `ShardBits` adoption) —
 
 Default behavior is restart-on-adopt; add `-live-resharding` for the dual-emit bridging path. See [docs/architecture.md](docs/architecture.md#brc-137-manifest-consumer-auto-shard-config) for the consumer subsystem.
 
+With JSON structured logging for fleet aggregation (and opt-in tracing) — see [Unified Logging Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md):
+
+```bash
+./shard-proxy \
+  -iface          eth0 \
+  -log-format     json \   # one JSON object per line on stdout
+  -log-level      info \   # runtime-togglable via POST /loglevel and SIGHUP
+  -trace-sampling 0        # >0 + -otlp-endpoint enables control-plane traces
+```
+
+Each binary emits a one-shot `host.inventory` event (OS/CPU/mem/NIC incl. IPv4+IPv6) at startup and a `bsp_host_info` gauge. See [docs/architecture.md](docs/architecture.md#logging--tracing).
+
 See [docs/configuration.md](docs/configuration.md) for all flags and environment variable equivalents.
 
 ## Container image

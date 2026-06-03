@@ -24,6 +24,9 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-instance` | `INSTANCE_ID` | hostname | OTel `service.instance.id` for federation |  |  |  |
 | `-otlp-endpoint` | `OTLP_ENDPOINT` | `""` | OTLP gRPC endpoint (empty = disabled) |  |  |  |
 | `-otlp-interval` | `OTLP_INTERVAL` | `30s` | OTLP push interval |  |  |  |
+| `-log-format` | `LOG_FORMAT` | `text` | Log output format: `text` (stderr, dev default) or `json` (stdout, for fleet aggregation). See [Unified Logging](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md) |  |  |  |
+| `-log-level` | `LOG_LEVEL` | `info` | Log level: `debug` \| `info` \| `warn` \| `error`. Runtime-togglable via `POST /loglevel?level=` and SIGHUP. `-debug` is a deprecated alias for `debug` |  |  |  |
+| `-trace-sampling` | `TRACE_SAMPLING` | `0` | Distributed-trace head sampling ratio `0`–`1` (`0` = tracing off, no-op tracer; exports via `-otlp-endpoint`; control-plane only, never the packet hot path) |  |  |  |
 | `-frag-mtu` | `FRAG_MTU` | `0` | Path MTU for BRC-130 fragmentation (0 = disabled) |  |  |  |
 | `-recv-batch` | `BSP_RECV_BATCH` | `32` | Datagrams per `recvmmsg` syscall (1 = per-packet legacy path) |  |  |  |
 | `-recv-buf-bytes` | `BSP_RECV_BUF_BYTES` | `0` | Per-worker `SO_RCVBUF` in bytes (`0` = system default; capped by `net.core.rmem_max`) |  |  |  |
