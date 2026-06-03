@@ -118,14 +118,20 @@ type Config struct {
 	// optionally mark the same Redis namespace on receive to inform the
 	// proxy when a TxID arrived via a path the proxy itself did not see.
 	//
-	// TxidDedupRedisAddr empty → tier-2 disabled; only the local LRU is used.
+	// Tier-2 backend is modular (shard-common/cache): redis (Redis/Valkey/
+	// Dragonfly), aerospike, memory, or none. TxidDedupBackend empty infers
+	// "redis" when TxidDedupRedisAddr is set, else "none" (tier-1 LRU only).
 	// TxidDedupEnabled=false → dedup feature disabled entirely (overrides
 	// TxidDedupLocalCap). Off-path is one nil check per packet.
-	TxidDedupEnabled   bool
-	TxidDedupRedisAddr string
-	TxidDedupPrefix    string
-	TxidDedupTTL       time.Duration
-	TxidDedupLocalCap  int
+	TxidDedupEnabled       bool
+	TxidDedupBackend       string
+	TxidDedupRedisAddr     string
+	TxidDedupAeroHosts     []string
+	TxidDedupAeroNamespace string
+	TxidDedupAeroSet       string
+	TxidDedupPrefix        string
+	TxidDedupTTL           time.Duration
+	TxidDedupLocalCap      int
 
 	// Auto-shard-config (BRC-137 manifest consumer). All fields are opt-in.
 	// When AutoConfigEnabled is false, the proxy does not join the beacon
@@ -185,8 +191,16 @@ func Load() (*Config, error) {
 
 	flag.BoolVar(&c.TxidDedupEnabled, "ingress-dedup", envBool("INGRESS_DEDUP", true),
 		"enable ingress TxID dedup (false = bypass entirely; measured ~17% CPU at high pps with no-Redis local-only LRU)")
+	flag.StringVar(&c.TxidDedupBackend, "txid-dedup-backend", envStr("TXID_DEDUP_BACKEND", ""),
+		"tier-2 dedup backend: redis|aerospike|memory|none (empty = infer redis when -txid-dedup-redis-addr set, else none)")
 	flag.StringVar(&c.TxidDedupRedisAddr, "txid-dedup-redis-addr", envStr("TXID_DEDUP_REDIS_ADDR", ""),
-		"Redis address for ingress TxID dedup (empty = local-only tier-1 LRU)")
+		"Redis-protocol address (Redis/Valkey/Dragonfly) for ingress TxID dedup (empty = local-only tier-1 LRU)")
+	aeroHosts := flag.String("txid-dedup-aerospike-hosts", envStr("TXID_DEDUP_AEROSPIKE_HOSTS", ""),
+		"Aerospike seed nodes host:port (comma-separated); required when -txid-dedup-backend=aerospike")
+	flag.StringVar(&c.TxidDedupAeroNamespace, "txid-dedup-aerospike-namespace", envStr("TXID_DEDUP_AEROSPIKE_NAMESPACE", "cache"),
+		"Aerospike namespace for ingress TxID dedup")
+	flag.StringVar(&c.TxidDedupAeroSet, "txid-dedup-aerospike-set", envStr("TXID_DEDUP_AEROSPIKE_SET", "bsp"),
+		"Aerospike set for ingress TxID dedup")
 	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", "bsp:tx:"),
 		"Redis key prefix for ingress TxID dedup entries (must match listener's -ingress-set-prefix at the same site)")
 	flag.DurationVar(&c.TxidDedupTTL, "txid-dedup-ttl", envDuration("TXID_DEDUP_TTL", 10*time.Minute),
@@ -303,6 +317,23 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("at least one egress interface must be specified via -iface")
 	}
 
+	// Parse Aerospike seed nodes for the dedup backend.
+	for _, h := range strings.Split(*aeroHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			c.TxidDedupAeroHosts = append(c.TxidDedupAeroHosts, h)
+		}
+	}
+
+	// Infer the tier-2 backend when not set explicitly: redis if an address
+	// was provided (back-compat), else none (tier-1 LRU only).
+	if c.TxidDedupBackend == "" {
+		if c.TxidDedupRedisAddr != "" {
+			c.TxidDedupBackend = "redis"
+		} else {
+			c.TxidDedupBackend = "none"
+		}
+	}
+
 	// Validate TxID dedup parameters when the feature is enabled.
 	if c.TxidDedupLocalCap > 0 {
 		if c.TxidDedupTTL <= 0 {
@@ -310,6 +341,17 @@ func Load() (*Config, error) {
 		}
 		if c.TxidDedupPrefix == "" {
 			return nil, fmt.Errorf("txid-dedup-prefix must not be empty when dedup is enabled")
+		}
+		switch c.TxidDedupBackend {
+		case "redis", "aerospike", "memory", "none":
+		default:
+			return nil, fmt.Errorf("txid-dedup-backend %q unknown; valid: redis, aerospike, memory, none", c.TxidDedupBackend)
+		}
+		if c.TxidDedupBackend == "redis" && c.TxidDedupRedisAddr == "" {
+			return nil, fmt.Errorf("txid-dedup-redis-addr required when txid-dedup-backend=redis")
+		}
+		if c.TxidDedupBackend == "aerospike" && len(c.TxidDedupAeroHosts) == 0 {
+			return nil, fmt.Errorf("txid-dedup-aerospike-hosts required when txid-dedup-backend=aerospike")
 		}
 	}
 

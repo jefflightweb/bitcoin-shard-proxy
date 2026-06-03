@@ -58,6 +58,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lightwebinc/shard-common/cache"
 	commanifest "github.com/lightwebinc/shard-common/manifest"
 	"github.com/lightwebinc/shard-common/shard"
 	"github.com/lightwebinc/shard-common/txidset"
@@ -156,12 +157,24 @@ func main() {
 		slog.Info("multicast egress source bound", "bind_source", ip.String(), "source_mode", cfg.SourceMode)
 	}
 
-	// Optional ingress TxID dedup. Two-tier (local LRU → Redis SETNX).
+	// Optional ingress TxID dedup. Two-tier: tier-1 local LRU (hot path) →
+	// tier-2 modular cache backend SETNX (redis/aerospike/memory/none).
 	// -ingress-dedup=false or TxidDedupLocalCap=0 disables the feature.
 	var txStore *txidset.Store
 	if cfg.TxidDedupEnabled && cfg.TxidDedupLocalCap > 0 {
-		txStore, err = txidset.New(txidset.Config{
+		backend, berr := cache.Open(context.Background(), cache.Config{
+			Backend:       cfg.TxidDedupBackend,
 			RedisAddr:     cfg.TxidDedupRedisAddr,
+			AeroHosts:     cfg.TxidDedupAeroHosts,
+			AeroNamespace: cfg.TxidDedupAeroNamespace,
+			AeroSet:       cfg.TxidDedupAeroSet,
+		})
+		if berr != nil {
+			slog.Error("txid dedup backend init failed", "backend", cfg.TxidDedupBackend, "err", berr)
+			os.Exit(1)
+		}
+		txStore, err = txidset.New(txidset.Config{
+			Backend:       backend,
 			TTL:           cfg.TxidDedupTTL,
 			LocalCapacity: cfg.TxidDedupLocalCap,
 			Recorder:      txidsetRecorder{rec: rec},
@@ -170,9 +183,15 @@ func main() {
 			slog.Error("txid dedup init failed", "err", err)
 			os.Exit(1)
 		}
-		defer func() { _ = txStore.Close() }()
+		defer func() {
+			_ = txStore.Close()
+			if backend != nil {
+				_ = backend.Close()
+			}
+		}()
 		fwd.SetTxidDedup(txStore, cfg.TxidDedupPrefix)
 		slog.Info("ingress TxID dedup enabled",
+			"backend", cfg.TxidDedupBackend,
 			"redis_addr", cfg.TxidDedupRedisAddr,
 			"prefix", cfg.TxidDedupPrefix,
 			"ttl", cfg.TxidDedupTTL,

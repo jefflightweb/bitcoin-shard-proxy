@@ -252,10 +252,12 @@ frame. Legacy BRC-12 (V1) frames bypass the gate.
   workers. Memory bounded by `-txid-dedup-local-cap` (default 1 048 576
   entries, ~50 MiB). A hit short-circuits and the frame is dropped without
   contacting Redis.
-- **Tier 2** — Redis `SETNX EX`. Activated only when
-  `-txid-dedup-redis-addr` is non-empty. On a tier-1 miss the proxy claims
-  `<prefix><hex-txid>` in Redis; on win it forwards, on loss it drops.
-  Errors fail open (frame is forwarded; a metric is recorded).
+- **Tier 2** — a modular `shard-common/cache` backend `SetNX`
+  (`redis|aerospike|memory`). Selected by `-txid-dedup-backend` (or inferred:
+  `redis` when `-txid-dedup-redis-addr` is set, else `none`). On a tier-1 miss
+  the proxy claims `<prefix><hex-txid>`; on win it forwards, on loss it drops.
+  Errors fail open (frame is forwarded; a metric is recorded). See
+  [`bsv-multicast/docs/ModularCacheBackend/`](../../bsv-multicast/docs/ModularCacheBackend/modular-cache-backend.md).
 
 The whole gate runs per packet, so it costs CPU. After the localSet
 sharding + direct-Prometheus counter work the dedup-on overhead is small
@@ -269,7 +271,11 @@ single upstream feed). Leave it on for any multi-proxy or bridged topology.
 | Flag | Env | Default | Notes |
 |------|-----|---------|-------|
 | `-ingress-dedup` | `INGRESS_DEDUP` | `true` | `false` bypasses the entire gate. Only safe for single-proxy ingest |
-| `-txid-dedup-redis-addr` | `TXID_DEDUP_REDIS_ADDR` | `""` | Empty disables tier-2 (local-only) |
+| `-txid-dedup-backend` | `TXID_DEDUP_BACKEND` | inferred | `redis\|aerospike\|memory\|none`. Empty → `redis` if addr set, else `none` |
+| `-txid-dedup-redis-addr` | `TXID_DEDUP_REDIS_ADDR` | `""` | Redis/Valkey/Dragonfly address; empty disables tier-2 (local-only) |
+| `-txid-dedup-aerospike-hosts` | `TXID_DEDUP_AEROSPIKE_HOSTS` | `""` | Comma-separated `host:port`; required when backend=`aerospike` |
+| `-txid-dedup-aerospike-namespace` | `TXID_DEDUP_AEROSPIKE_NAMESPACE` | `cache` | Aerospike namespace (must be provisioned) |
+| `-txid-dedup-aerospike-set` | `TXID_DEDUP_AEROSPIKE_SET` | `bsp` | Aerospike set |
 | `-txid-dedup-prefix` | `TXID_DEDUP_PREFIX` | `bsp:tx:` | Must match the local listener's `-ingress-set-prefix` for collapsed deployments |
 | `-txid-dedup-ttl` | `TXID_DEDUP_TTL` | `10m` | Range 1m – 30m typical |
 | `-txid-dedup-local-cap` | `TXID_DEDUP_LOCAL_CAP` | `1048576` | 0 also disables the feature; prefer `-ingress-dedup=false` for clarity |
