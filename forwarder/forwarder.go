@@ -689,7 +689,7 @@ func (fw *Forwarder) fragmentBlock(egr *Egress, raw []byte, bf *frame.BlockFrame
 // ProcessSubtreeData handles BRC-132 subtree data frames (FrameVer 0x05).
 // It validates the frame, stamps HashKey/SeqNum per (sender, 0xFFFB, subtreeID)
 // flow, optionally fragments large payloads via BRC-130, and enqueues for
-// the GroupSubtreeAnnounce multicast group.
+// the GroupSubtreeDataAnnounce multicast group.
 //
 // raw must remain valid until egr.Flush returns. egr may be nil for tests.
 func (fw *Forwarder) ProcessSubtreeData(egr *Egress, raw []byte, src net.Addr, workerID int) {
@@ -717,7 +717,7 @@ func (fw *Forwarder) ProcessSubtreeData(egr *Egress, raw []byte, src net.Addr, w
 
 	if src != nil {
 		ip := addrToIPv6(src)
-		ctrlIdx := uint32(shard.GroupSubtreeAnnounce)
+		ctrlIdx := uint32(shard.GroupSubtreeDataAnnounce)
 
 		// BRC-130 fragmentation path for large subtree data payloads.
 		if fw.fragDataSize > 0 && len(sf.Payload) > fw.fragDataSize {
@@ -734,7 +734,7 @@ func (fw *Forwarder) ProcessSubtreeData(egr *Egress, raw []byte, src net.Addr, w
 		return
 	}
 
-	dst := shard.GroupAddr(fw.mcPrefix, fw.mcGroupID, shard.GroupSubtreeAnnounce)
+	dst := shard.GroupAddr(fw.mcPrefix, fw.mcGroupID, shard.GroupSubtreeDataAnnounce)
 	addr := net.UDPAddr{IP: dst, Port: fw.egressPort}
 	egr.EnqueueControl(raw, addr, "subtree_data", workerID)
 
@@ -748,7 +748,7 @@ func (fw *Forwarder) ProcessSubtreeData(egr *Egress, raw []byte, src net.Addr, w
 }
 
 // fragmentSubtreeData splits a large BRC-132 subtree data payload into BRC-130
-// fragments and enqueues each for the GroupSubtreeAnnounce control group.
+// fragments and enqueues each for the GroupSubtreeDataAnnounce control group.
 // Each fragment receives OrigFrameVer=0x05 so that reassembly routes the
 // completed payload to processSubtreeDataFrame on the listener.
 // MsgType is preserved in byte 7 of each fragment datagram.
@@ -779,7 +779,7 @@ func (fw *Forwarder) fragmentSubtreeData(egr *Egress, raw []byte, sf *frame.Subt
 	var zeroSub [32]byte
 
 	fragTotal := uint16(k)
-	dst := shard.GroupAddr(fw.mcPrefix, fw.mcGroupID, shard.GroupSubtreeAnnounce)
+	dst := shard.GroupAddr(fw.mcPrefix, fw.mcGroupID, shard.GroupSubtreeDataAnnounce)
 	addr := net.UDPAddr{IP: dst, Port: fw.egressPort}
 
 	for i := 0; i < k; i++ {
@@ -835,7 +835,7 @@ func (fw *Forwarder) fragmentSubtreeData(egr *Egress, raw []byte, sf *frame.Subt
 func (fw *Forwarder) EgressPort() int { return fw.egressPort }
 
 // ForwardControl enqueues a raw BRC-127 control datagram (e.g.
-// SubtreeAnnounce) for the given network-service multicast group index. The
+// SubtreeGroupAnnounce) for the given network-service multicast group index. The
 // destination address is derived using [shard.GroupAddr] with the engine's
 // configured scope prefix and IANA group-id. Unlike [Process], no sequence
 // stamping or frame decoding is performed. raw must remain valid until

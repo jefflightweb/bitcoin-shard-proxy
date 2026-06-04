@@ -48,14 +48,14 @@ func TestHandleConnV5SubtreeDataFrame(t *testing.T) {
 	})
 }
 
-func TestHandleConnSubtreeAnnounceControl(t *testing.T) {
+func TestHandleConnSubtreeGroupAnnounceControl(t *testing.T) {
 	dialHandleConn(t, func(c net.Conn) {
-		// A 64-byte SubtreeAnnounce datagram: magic + MsgTypeSubtreeAnnounce
-		// at offset 6, padded out to SubtreeAnnounceSize.
-		buf := make([]byte, frame.SubtreeAnnounceSize)
+		// A 64-byte SubtreeGroupAnnounce datagram: magic + MsgTypeSubtreeGroupAnnounce
+		// at offset 6, padded out to SubtreeGroupAnnounceSize.
+		buf := make([]byte, frame.SubtreeGroupAnnounceSize)
 		binary.BigEndian.PutUint32(buf[0:4], frame.MagicBSV)
 		binary.BigEndian.PutUint16(buf[4:6], frame.ProtoVer)
-		buf[6] = frame.MsgTypeSubtreeAnnounce
+		buf[6] = frame.MsgTypeSubtreeGroupAnnounce
 		_, _ = c.Write(buf)
 	})
 }

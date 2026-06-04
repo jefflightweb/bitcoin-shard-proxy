@@ -375,7 +375,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 
 	if r.ctrlFramesForwarded, err = meter.Int64Counter("bsp_control_frames_forwarded_total",
-		metric.WithDescription("BRC-127 control datagrams forwarded to multicast (e.g. SubtreeAnnounce)")); err != nil {
+		metric.WithDescription("BRC-127 control datagrams forwarded to multicast (e.g. SubtreeGroupAnnounce)")); err != nil {
 		return nil, err
 	}
 	if r.tcpConnections, err = meter.Int64Counter("bsp_tcp_connections_total",
@@ -465,7 +465,7 @@ func (r *Recorder) FrameFragmented(workerID int, k int) {
 }
 
 // ControlFrameForwarded records a BRC-127 control datagram forwarded via ForwardControl.
-// ctrlGroup names the destination control group (e.g. "subtree_announce").
+// ctrlGroup names the destination control group (e.g. "subtree_group_announce").
 func (r *Recorder) ControlFrameForwarded(ctrlGroup string) {
 	r.ctrlFramesForwarded.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("ctrl_group", ctrlGroup),

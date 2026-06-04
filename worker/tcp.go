@@ -148,17 +148,17 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 
 		var hdrSize, payLen int
 		switch hdrBuf[6] {
-		case frame.MsgTypeSubtreeAnnounce:
-			// BRC-127 SubtreeAnnounce: 64-byte fixed datagram.
+		case frame.MsgTypeSubtreeGroupAnnounce:
+			// BRC-127 SubtreeGroupAnnounce: 64-byte fixed datagram.
 			// 44 bytes already read; read the remaining 20 bytes.
-			var ctrlBuf [frame.SubtreeAnnounceSize]byte
+			var ctrlBuf [frame.SubtreeGroupAnnounceSize]byte
 			copy(ctrlBuf[:frame.HeaderSizeLegacy], hdrBuf[:frame.HeaderSizeLegacy])
-			if _, err := io.ReadFull(br, ctrlBuf[frame.HeaderSizeLegacy:frame.SubtreeAnnounceSize]); err != nil {
-				ti.log.Debug("TCP read SubtreeAnnounce extension error", "remote", remote, "err", err)
+			if _, err := io.ReadFull(br, ctrlBuf[frame.HeaderSizeLegacy:frame.SubtreeGroupAnnounceSize]); err != nil {
+				ti.log.Debug("TCP read SubtreeGroupAnnounce extension error", "remote", remote, "err", err)
 				return
 			}
 			if ti.rec != nil {
-				ti.rec.TCPBytesReceived(frame.SubtreeAnnounceSize)
+				ti.rec.TCPBytesReceived(frame.SubtreeGroupAnnounceSize)
 			}
 			ti.fwd.ForwardControl(egr, ctrlBuf[:], shard.GroupSubtreeGroupAnnounce, ti.fwd.EgressPort())
 			if egr != nil {

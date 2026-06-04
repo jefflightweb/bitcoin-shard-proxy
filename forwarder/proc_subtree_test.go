@@ -137,7 +137,7 @@ func TestFragmentSubtreeData_PooledFragments(t *testing.T) {
 
 	raw := buildSubtreeDataFrame(t, 0x88, payload)
 	ip := addrToIPv6(src)
-	ctrlIdx := uint32(shard.GroupSubtreeAnnounce)
+	ctrlIdx := uint32(shard.GroupSubtreeDataAnnounce)
 	var sub [32]byte
 	sub[0] = 0x88
 

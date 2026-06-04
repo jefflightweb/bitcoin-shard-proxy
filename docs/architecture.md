@@ -16,7 +16,7 @@ Foundational concepts (shard hierarchy, anycast ingress, frame versions) live in
 ```text
 sender  ──UDP/TCP──►  shard-proxy  ──UDP multicast──►  FF05::B:<shard>  (data plane, configurable scope)
                       (forwarder pipeline) ├─────────────────►  FF0E::B:FFFE     (GroupBlockBroadcast, BRC-131/134, always global)
-                                           ├─────────────────►  FF05::B:FFFB     (GroupSubtreeAnnounce, BRC-132)
+                                           ├─────────────────►  FF05::B:FFFB     (GroupSubtreeDataAnnounce, BRC-132)
                                            └─────────────────►  FF05::B:FFFC     (GroupSubtreeGroupAnnounce, BRC-127)
 ```
 
@@ -58,7 +58,7 @@ shard-derived data-plane groups. The reserved indices (top of the 16-bit space, 
 | Constant | Index | Canonical Address (group-id `0x000B`) | Purpose |
 |---|---|---|---|
 | `GroupBlockHeader` | 0xFFFA | egress-scope `FF0X::<egress-gid>:FFFA` | Block header egress channel (BRC-135) |
-| `GroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
+| `GroupSubtreeDataAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
 | `GroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC (data-plane scope) | BRC-127 subtree group announcements |
 | `GroupBeacon` | 0xFFFD | FF05::B:FFFD (site) / FF0E::B:FFFD (global) | ADVERT beacon (BRC-126 discovery) |
 | `GroupBlockBroadcast` | 0xFFFE | **FF0E::B:FFFE (always global)** | BRC-131 block control + BRC-134 anchor frames |
@@ -114,7 +114,7 @@ subscriber regardless of which shard their TxID would otherwise hash to. UDP wor
 - Stamps `HashKey` as `XXH64(senderIPv6 ∥ 0xFFFB ∥ subtreeID)` and `SeqNum` as a monotonic
   per-flow counter. The flow key incorporates `subtreeID` so each distinct subtree is
   sequenced independently.
-- Forwards the raw bytes to `GroupSubtreeAnnounce` (`FF0X::B:FFFB`) on all egress interfaces.
+- Forwards the raw bytes to `GroupSubtreeDataAnnounce` (`FF0X::B:FFFB`) on all egress interfaces.
 - If the payload exceeds the BRC-130 fragment threshold, calls `fragmentSubtreeData()`.
   Each fragment carries `OrigFrameVer=0x05` and preserves the `MsgType` byte (offset 7).
 
@@ -157,9 +157,9 @@ and UDP share the same `forwarder.Forwarder` and egress targets.
 | `0x04` (BRC-131) | Block control | 92 bytes | 48 more + `PayLen` | `ProcessBlock` |
 | `0x05` (BRC-132) | Subtree data | 92 bytes | 48 more + `PayLen` | `ProcessSubtreeData` |
 | `0x06` (BRC-134) | Anchor tx | 92 bytes | 48 more + `PayLen` | `ProcessAnchor` |
-| `0x30` (MsgType, BRC-127) | SubtreeAnnounce | 64 bytes | 20 more (no payload) | `ForwardControl` |
+| `0x30` (MsgType, BRC-127) | SubtreeGroupAnnounce | 64 bytes | 20 more (no payload) | `ForwardControl` |
 
-> The dispatcher branches on `hdrBuf[6]`. For BRC-12/124/131/132/134 this byte is the Frame Version (`0x01`/`0x02`/`0x04`/`0x05`/`0x06`); for BRC-127 it is the MsgType byte (`0x30 = MsgTypeSubtreeAnnounce`).
+> The dispatcher branches on `hdrBuf[6]`. For BRC-12/124/131/132/134 this byte is the Frame Version (`0x01`/`0x02`/`0x04`/`0x05`/`0x06`); for BRC-127 it is the MsgType byte (`0x30 = MsgTypeSubtreeGroupAnnounce`).
 
 ```
 senders (UDP/TCP)          proxy (N UDP workers + 1 TCP listener)
@@ -169,7 +169,7 @@ tx_b  ──UDP──▶ [worker 1] ─▶ forwarder ─▶ FF05::B:1    ──�
 blk_c ──UDP──▶ [worker N] ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z   (GroupBlockBroadcast, BRC-131)
 blk_d ──TCP──▶ [tcp conn] ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z
 anc_e ──UDP──▶ [worker N] ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z   (GroupBlockBroadcast, BRC-134)
-sub_f ──TCP──▶ [tcp conn] ─▶ forwarder ─▶ FF05::B:FFFB ──▶ sub_W   (GroupSubtreeAnnounce, BRC-132)
+sub_f ──TCP──▶ [tcp conn] ─▶ forwarder ─▶ FF05::B:FFFB ──▶ sub_W   (GroupSubtreeDataAnnounce, BRC-132)
 ```
 
 ## Wire Format

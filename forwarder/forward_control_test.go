@@ -18,7 +18,7 @@ func TestForwardControl_PerTargetWrite(t *testing.T) {
 	// path without panicking.
 	raw := make([]byte, 64)
 	raw[0] = 0xE3
-	fw.ForwardControl(egr, raw, shard.GroupSubtreeAnnounce, 9001)
+	fw.ForwardControl(egr, raw, shard.GroupSubtreeDataAnnounce, 9001)
 	fw.ForwardControl(egr, raw, shard.GroupBeacon, 9001)
 	fw.ForwardControl(egr, raw, shard.GroupIdx(0xF000), 9001) // unknown — exercises default label branch
 }
