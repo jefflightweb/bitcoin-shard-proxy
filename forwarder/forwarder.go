@@ -145,6 +145,7 @@ type Forwarder struct {
 	log          *slog.Logger
 	fragDataSize int    // >0 = fragmentation enabled; fragment capacity per datagram
 	bindSource   net.IP // optional; when non-nil egress sockets are syscall.Bind'd to this IPv6 so SSM receivers can pre-declare it
+	hopLimit     int    // IPV6_MULTICAST_HOPS for egress; 0 = leave kernel default (1)
 
 	// bridging is the optional secondary engine used during a BRC-137
 	// live-resharding bridging window. nil ⇒ single-emit (steady
@@ -196,6 +197,15 @@ func (fw *Forwarder) Bridging() *BridgingEngine {
 // Must be called before [OpenTargets].
 func (fw *Forwarder) SetBindSource(ip net.IP) {
 	fw.bindSource = ip
+}
+
+// SetEgressHopLimit configures IPV6_MULTICAST_HOPS for every egress socket.
+// The default multicast hop limit is 1 (single L2 segment); routed or tunneled
+// mesh fabrics (ip6gre + mc-router) must raise it so per-hop decrement does not
+// drop frames before they reach remote subscribers. 0 leaves the kernel
+// default. Must be called before [OpenTargets].
+func (fw *Forwarder) SetEgressHopLimit(n int) {
+	fw.hopLimit = n
 }
 
 // SetTxidDedup attaches a TxID claim store used to suppress ingress
@@ -266,7 +276,7 @@ func (fw *Forwarder) OpenTargets(ifaces []*net.Interface, probeWorker bool) ([]T
 	}
 	targets := make([]Target, 0, len(ifaces))
 	for _, iface := range ifaces {
-		conn, err := openEgressSocket(iface, loopback, fw.bindSource)
+		conn, err := openEgressSocket(iface, loopback, fw.bindSource, fw.hopLimit)
 		if err != nil {
 			closeTargets(targets, fw.log)
 			return nil, fmt.Errorf("forwarder: open egress socket (%s): %w", iface.Name, err)
@@ -916,7 +926,7 @@ func stripeIndex(ip [16]byte) uint8 {
 // the wildcard "::"), so the kernel emits multicast egress with that
 // specific source IPv6. Required when source-mode=ssm so SSM receivers
 // can pre-declare this proxy in their (S,G) join calls.
-func openEgressSocket(iface *net.Interface, loopback int, bindSource net.IP) (*net.UDPConn, error) {
+func openEgressSocket(iface *net.Interface, loopback int, bindSource net.IP, hopLimit int) (*net.UDPConn, error) {
 	listenAddr := "[::]:0"
 	if bindSource != nil {
 		listenAddr = "[" + bindSource.String() + "]:0"
@@ -940,6 +950,12 @@ func openEgressSocket(iface *net.Interface, loopback int, bindSource net.IP) (*n
 		}
 		if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_MULTICAST_LOOP, loopback); err != nil {
 			slog.Default().Warn("could not configure multicast loopback", "iface", iface.Name, "err", err)
+		}
+		if hopLimit > 0 {
+			if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_MULTICAST_HOPS, hopLimit); err != nil {
+				setsockoptErr = fmt.Errorf("IPV6_MULTICAST_HOPS: %w", err)
+				return
+			}
 		}
 	}); ctrlErr != nil {
 		_ = udpConn.Close()

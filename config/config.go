@@ -11,6 +11,7 @@
 //	-tcp-listen-port      TCP_LISTEN_PORT       0         TCP ingress port (0 = disabled)
 //	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
 //	-egress-port          EGRESS_PORT           9001      Destination port on groups
+//	-egress-hoplimit      EGRESS_HOPLIMIT       1         IPV6_MULTICAST_HOPS (raise for routed/tunneled mesh)
 //	-shard-bits           SHARD_BITS            2         Key bit width (1–15)
 //	-scope                MC_SCOPE              site      Multicast scope
 //	-mc-group-id          MC_GROUP_ID           0x000B    IANA group-id (default Bitcoin = 0x000B)
@@ -60,11 +61,12 @@ var Scopes = map[string]uint16{
 // after [Load] returns; treat the value as immutable.
 type Config struct {
 	// Network
-	ListenAddr    string   // e.g. "[::]"
-	UDPListenPort int      // UDP port to receive BSV BRC-124/BRC-128 transaction frames
-	TCPListenPort int      // TCP ingress port; 0 = disabled
-	EgressIfaces  []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
-	EgressPort    int      // Destination UDP port written into outgoing multicast datagrams
+	ListenAddr     string   // e.g. "[::]"
+	UDPListenPort  int      // UDP port to receive BSV BRC-124/BRC-128 transaction frames
+	TCPListenPort  int      // TCP ingress port; 0 = disabled
+	EgressIfaces   []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
+	EgressPort     int      // Destination UDP port written into outgoing multicast datagrams
+	EgressHopLimit int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
 
 	// Sharding
 	ShardBits  uint   // Number of txid prefix bits used as the group key (1–15)
@@ -169,6 +171,8 @@ func Load() (*Config, error) {
 		"comma-separated NIC names for multicast egress (e.g. eth0,eth1)")
 	flag.IntVar(&c.EgressPort, "egress-port", envInt("EGRESS_PORT", 9001),
 		"destination UDP port written into outgoing multicast datagrams")
+	flag.IntVar(&c.EgressHopLimit, "egress-hoplimit", envInt("EGRESS_HOPLIMIT", 1),
+		"IPv6 multicast hop limit for egress (IPV6_MULTICAST_HOPS); raise above 1 for routed/tunneled mesh fabrics")
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.StringVar(&c.MCScope, "scope", envStr("MC_SCOPE", "site"),

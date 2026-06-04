@@ -174,6 +174,7 @@ func main() {
 
 	// Construct the shared forwarder.
 	fwd := forwarder.New(engine, cfg.MCPrefix, cfg.MCGroupID, cfg.EgressPort, cfg.Debug, rec)
+	fwd.SetEgressHopLimit(cfg.EgressHopLimit)
 	if cfg.FragMTU > 0 {
 		fwd.SetFragMTU(cfg.FragMTU)
 		slog.Info("BRC-130 fragmentation enabled", "frag_mtu", cfg.FragMTU)
