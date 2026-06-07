@@ -16,10 +16,11 @@
 // allocated once at [New] time and stored on [Recorder]. Record methods
 // use them directly — no map lookups on the critical path.
 //
-// Per-(interface, group) metric.MeasurementOption values are cached in a
-// sync.Map keyed by an ifaceGroupKey struct. The first packet to a new
-// (iface, group) pair allocates and stores the option; subsequent packets
-// retrieve it with a single sync.Map Load — zero allocation after first hit.
+// Per-(interface, worker) and per-(interface, group) Prometheus counter
+// handles are integer-indexed under [ifaceState] (slice by workerID / group),
+// behind an atomic copy-on-write per-interface map. After warmup the hot path
+// is a lock-free atomic load + short-string map lookup + slice index, with no
+// per-packet sync.Map hashing or active-group mutex.
 //
 // # Health endpoints
 //
@@ -63,18 +64,23 @@ const ServiceName = "shard-proxy"
 // Defaults to "dev" when not injected.
 var Version = "dev"
 
-// ifaceGroupKey is the composite cache key for per-(interface, group)
-// OTel MeasurementOption values.
-type ifaceGroupKey struct {
-	iface string
-	group uint32
+// ifaceState holds the pre-bound hot-path counter handles for one egress
+// interface, integer-indexed for O(1) lock-free reads after warmup. It
+// replaces the per-packet interface-keyed sync.Map lookups (profiled at a
+// large share of CPU on the zero-copy hot path): the hot path now costs one
+// atomic load + a short-string map lookup + slice indexing.
+type ifaceState struct {
+	iface   string
+	workers []*hotPathCounters        // indexed by workerID; bound on first use
+	flows   atomic.Pointer[flowTable] // COW, indexed by groupIdx
+	mu      sync.Mutex                // guards worker binding + flow COW grow
 }
 
-// workerIfaceKey is the composite cache key for per-(interface, worker)
-// hot-path Prometheus counter handles.
-type workerIfaceKey struct {
-	iface  string
-	worker int
+// flowTable is an immutable (copy-on-write) per-group counter table indexed by
+// group index. Stored behind ifaceState.flows so reads are lock-free.
+type flowTable struct {
+	packets []promclient.Counter
+	bytes   []promclient.Counter
 }
 
 // hotPathCounters bundles the pre-bound prometheus.Counter handles for a
@@ -122,14 +128,12 @@ type Recorder struct {
 	promFlowPackets *promclient.CounterVec
 	promFlowBytes   *promclient.CounterVec
 
-	// Per-(iface, worker) child-counter cache. Each hot-path Recorder method
-	// looks up a struct of pre-bound prometheus.Counter handles, avoiding
-	// the WithLabelValues lookup on every packet.
-	hotPathCache sync.Map // workerIfaceKey -> *hotPathCounters
-
-	// Active group tracking — iface → set of group indices
-	activeGroupsMu sync.Mutex
-	activeGroups   map[string]map[uint32]struct{}
+	// Per-interface integer-indexed hot-path cache. Reads are lock-free (one
+	// atomic load + a short-string map lookup + slice index); first sight of an
+	// (iface)/(iface,worker)/(iface,group) binds under a lock. Replaces the two
+	// per-packet interface-keyed sync.Maps and the per-packet active-group mutex.
+	ifaceStates atomic.Pointer[map[string]*ifaceState]
+	ifaceMu     sync.Mutex // guards ifaceStates copy-on-write
 
 	// Fragmentation counters (BRC-130)
 	framesFragmented metric.Int64Counter
@@ -148,10 +152,6 @@ type Recorder struct {
 	promTxidClaimWon      *promclient.CounterVec
 	promTxidClaimLost     *promclient.CounterVec
 	promTxidClaimError    *promclient.CounterVec
-
-	// Per-(iface, group) prometheus.Counter pair cache — used by
-	// flowCounters() for [packets, bytes] handles.
-	attrCache sync.Map
 
 	// draining is set to true when a shutdown signal has been received and the
 	// proxy is waiting for the load-balancer to stop routing new connections.
@@ -250,13 +250,12 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 
 	r := &Recorder{
-		provider:     mp,
-		promReg:      promclient.Gatherers{reg, runtimeReg},
-		promOtelReg:  reg,
-		runtimeReg:   runtimeReg,
-		numWorkers:   numWorkers,
-		startTime:    time.Now(),
-		activeGroups: make(map[string]map[uint32]struct{}),
+		provider:    mp,
+		promReg:     promclient.Gatherers{reg, runtimeReg},
+		promOtelReg: reg,
+		runtimeReg:  runtimeReg,
+		numWorkers:  numWorkers,
+		startTime:   time.Now(),
 		shutdownFn: func(ctx context.Context) error {
 			var last error
 			for _, fn := range shutdownFuncs {
@@ -329,12 +328,18 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	if _, err = meter.Int64ObservableGauge("bsp_active_groups",
 		metric.WithDescription("Distinct shard groups seen since startup, per interface"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			r.activeGroupsMu.Lock()
-			defer r.activeGroupsMu.Unlock()
-			for iface, groups := range r.activeGroups {
-				o.Observe(int64(len(groups)),
-					metric.WithAttributes(attribute.String("network.interface.name", iface)),
-				)
+			if m := r.ifaceStates.Load(); m != nil {
+				for iface, st := range *m {
+					n := 0
+					for _, c := range st.flows.Load().packets {
+						if c != nil {
+							n++
+						}
+					}
+					o.Observe(int64(n),
+						metric.WithAttributes(attribute.String("network.interface.name", iface)),
+					)
+				}
 			}
 			return nil
 		}),
@@ -426,7 +431,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 // PacketReceived records receipt of a raw datagram on the ingress socket.
 func (r *Recorder) PacketReceived(iface string, workerID int, size int) {
-	c := r.hotPath(iface, workerID)
+	c := r.ifaceState(iface).worker(r, workerID)
 	c.rxPackets.Inc()
 	c.rxBytes.Add(float64(size))
 	c.rxSize.Observe(float64(size))
@@ -440,15 +445,14 @@ func (r *Recorder) PacketDropped(iface string, workerID int, reason string) {
 
 // PacketForwarded records a successfully forwarded datagram.
 func (r *Recorder) PacketForwarded(iface string, workerID int, groupIdx uint32, size int) {
-	c := r.hotPath(iface, workerID)
+	st := r.ifaceState(iface)
+	c := st.worker(r, workerID)
 	c.txPackets.Inc()
 	c.txBytes.Add(float64(size))
 
-	fp, fb := r.flowCounters(iface, groupIdx)
+	fp, fb := st.flow(r, groupIdx)
 	fp.Inc()
 	fb.Add(float64(size))
-
-	r.trackGroup(iface, groupIdx)
 }
 
 // FrameFragmented records one frame that exceeded the fragmentation threshold.
@@ -639,59 +643,91 @@ func ifaceAttr(iface string) attribute.KeyValue {
 	return attribute.String("network.interface.name", iface)
 }
 
-// hotPath returns the cached bundle of prometheus.Counter handles for an
-// (iface, worker) tuple. First call binds + stores; subsequent calls are
-// one sync.Map Load. WithLabelValues internally uses a label-keyed map;
-// caching the resulting Counter handles avoids that lookup per packet.
-func (r *Recorder) hotPath(iface string, workerID int) *hotPathCounters {
-	key := workerIfaceKey{iface: iface, worker: workerID}
-	if v, ok := r.hotPathCache.Load(key); ok {
-		return v.(*hotPathCounters)
+// ifaceState returns the (lock-free after warmup) per-interface counter state,
+// binding a new one on first sight via copy-on-write.
+func (r *Recorder) ifaceState(iface string) *ifaceState {
+	if m := r.ifaceStates.Load(); m != nil {
+		if st, ok := (*m)[iface]; ok {
+			return st
+		}
+	}
+	r.ifaceMu.Lock()
+	defer r.ifaceMu.Unlock()
+	if m := r.ifaceStates.Load(); m != nil {
+		if st, ok := (*m)[iface]; ok {
+			return st
+		}
+	}
+	st := &ifaceState{iface: iface, workers: make([]*hotPathCounters, r.numWorkers)}
+	st.flows.Store(&flowTable{})
+	nm := make(map[string]*ifaceState)
+	if old := r.ifaceStates.Load(); old != nil {
+		for k, v := range *old {
+			nm[k] = v
+		}
+	}
+	nm[iface] = st
+	r.ifaceStates.Store(&nm)
+	return st
+}
+
+// worker returns the pre-bound hot-path counter bundle for workerID, binding it
+// on first use. Each worker only ever touches its own slot, so reads are
+// lock-free; binding is serialized under st.mu.
+func (st *ifaceState) worker(r *Recorder, workerID int) *hotPathCounters {
+	if workerID >= 0 && workerID < len(st.workers) {
+		if hp := st.workers[workerID]; hp != nil {
+			return hp
+		}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if workerID >= 0 && workerID < len(st.workers) && st.workers[workerID] != nil {
+		return st.workers[workerID]
 	}
 	w := strconv.Itoa(workerID)
-	c := &hotPathCounters{
-		rxPackets: r.promRxPackets.WithLabelValues(w, iface),
-		rxBytes:   r.promRxBytes.WithLabelValues(w, iface),
-		txPackets: r.promTxPackets.WithLabelValues(w, iface),
-		txBytes:   r.promTxBytes.WithLabelValues(w, iface),
-		rxSize:    r.promRxSize.WithLabelValues(w, iface),
+	hp := &hotPathCounters{
+		rxPackets: r.promRxPackets.WithLabelValues(w, st.iface),
+		rxBytes:   r.promRxBytes.WithLabelValues(w, st.iface),
+		txPackets: r.promTxPackets.WithLabelValues(w, st.iface),
+		txBytes:   r.promTxBytes.WithLabelValues(w, st.iface),
+		rxSize:    r.promRxSize.WithLabelValues(w, st.iface),
 	}
-	if actual, loaded := r.hotPathCache.LoadOrStore(key, c); loaded {
-		return actual.(*hotPathCounters)
+	if workerID >= 0 && workerID < len(st.workers) {
+		st.workers[workerID] = hp
 	}
-	return c
+	return hp
 }
 
-// flowCounters returns the (packets, bytes) prometheus.Counter handles for a
-// per-(iface, group) flow, cached the same way as hotPath.
-func (r *Recorder) flowCounters(iface string, groupIdx uint32) (promclient.Counter, promclient.Counter) {
-	key := ifaceGroupKey{iface: iface, group: groupIdx}
-	if v, ok := r.attrCache.Load(key); ok {
-		pair := v.([2]promclient.Counter)
-		return pair[0], pair[1]
+// flow returns the (packets, bytes) counters for groupIdx, binding via a
+// copy-on-write grow of the flow table on first sight. Reads are lock-free; the
+// table doubles as the active-group set (non-nil entry == group seen).
+func (st *ifaceState) flow(r *Recorder, groupIdx uint32) (promclient.Counter, promclient.Counter) {
+	ft := st.flows.Load()
+	if int(groupIdx) < len(ft.packets) {
+		if p := ft.packets[groupIdx]; p != nil {
+			return p, ft.bytes[groupIdx]
+		}
 	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	ft = st.flows.Load()
+	if int(groupIdx) < len(ft.packets) && ft.packets[groupIdx] != nil {
+		return ft.packets[groupIdx], ft.bytes[groupIdx]
+	}
+	n := len(ft.packets)
+	if int(groupIdx)+1 > n {
+		n = int(groupIdx) + 1
+	}
+	np := make([]promclient.Counter, n)
+	nb := make([]promclient.Counter, n)
+	copy(np, ft.packets)
+	copy(nb, ft.bytes)
 	groupStr := fmt.Sprintf("%04x", groupIdx)
-	pair := [2]promclient.Counter{
-		r.promFlowPackets.WithLabelValues(iface, groupStr),
-		r.promFlowBytes.WithLabelValues(iface, groupStr),
-	}
-	if actual, loaded := r.attrCache.LoadOrStore(key, pair); loaded {
-		p := actual.([2]promclient.Counter)
-		return p[0], p[1]
-	}
-	return pair[0], pair[1]
-}
-
-// trackGroup records that groupIdx was observed on iface.
-func (r *Recorder) trackGroup(iface string, groupIdx uint32) {
-	r.activeGroupsMu.Lock()
-	m, ok := r.activeGroups[iface]
-	if !ok {
-		m = make(map[uint32]struct{})
-		r.activeGroups[iface] = m
-	}
-	m[groupIdx] = struct{}{}
-	r.activeGroupsMu.Unlock()
+	np[groupIdx] = r.promFlowPackets.WithLabelValues(st.iface, groupStr)
+	nb[groupIdx] = r.promFlowBytes.WithLabelValues(st.iface, groupStr)
+	st.flows.Store(&flowTable{packets: np, bytes: nb})
+	return np[groupIdx], nb[groupIdx]
 }
 
 // ── HTTP server ──────────────────────────────────────────────────────────────

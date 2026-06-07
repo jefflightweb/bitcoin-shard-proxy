@@ -108,39 +108,50 @@ func TestWorkerReadyDone(t *testing.T) {
 
 func TestFlowCountersCacheHit(t *testing.T) {
 	rec := newTestRecorder(t, 1)
-	p1, b1 := rec.flowCounters("eth0", 7)
-	p2, b2 := rec.flowCounters("eth0", 7)
+	st := rec.ifaceState("eth0")
+	p1, b1 := st.flow(rec, 7)
+	p2, b2 := st.flow(rec, 7)
 	if p1 != p2 || b1 != b2 {
-		t.Error("flowCounters returned different handles for same key; cache miss on second call")
+		t.Error("flow returned different handles for same key; cache miss on second call")
 	}
 }
 
 func TestFlowCountersCacheMiss(t *testing.T) {
 	rec := newTestRecorder(t, 1)
-	p1, _ := rec.flowCounters("eth0", 1)
-	p2, _ := rec.flowCounters("eth0", 2)
+	st := rec.ifaceState("eth0")
+	p1, _ := st.flow(rec, 1)
+	p2, _ := st.flow(rec, 2)
 	if p1 == p2 {
-		t.Error("flowCounters returned same handle for different groups")
+		t.Error("flow returned same handle for different groups")
 	}
 }
 
-// ── trackGroup ────────────────────────────────────────────────────────────────
+// ── active group tracking (now derived from the flow table) ───────────────────
 
-func TestTrackGroup(t *testing.T) {
-	rec := newTestRecorder(t, 1)
-	rec.trackGroup("eth0", 1)
-	rec.trackGroup("eth0", 2)
-	rec.trackGroup("eth0", 1) // duplicate — should not grow the set
-	rec.trackGroup("eth1", 1)
-
-	rec.activeGroupsMu.Lock()
-	defer rec.activeGroupsMu.Unlock()
-
-	if len(rec.activeGroups["eth0"]) != 2 {
-		t.Errorf("eth0 active groups = %d, want 2", len(rec.activeGroups["eth0"]))
+func activeGroupCount(st *ifaceState) int {
+	n := 0
+	for _, c := range st.flows.Load().packets {
+		if c != nil {
+			n++
+		}
 	}
-	if len(rec.activeGroups["eth1"]) != 1 {
-		t.Errorf("eth1 active groups = %d, want 1", len(rec.activeGroups["eth1"]))
+	return n
+}
+
+func TestActiveGroupTracking(t *testing.T) {
+	rec := newTestRecorder(t, 1)
+	st0 := rec.ifaceState("eth0")
+	st0.flow(rec, 1)
+	st0.flow(rec, 2)
+	st0.flow(rec, 1) // duplicate — should not bind a new group
+	st1 := rec.ifaceState("eth1")
+	st1.flow(rec, 1)
+
+	if got := activeGroupCount(st0); got != 2 {
+		t.Errorf("eth0 active groups = %d, want 2", got)
+	}
+	if got := activeGroupCount(st1); got != 1 {
+		t.Errorf("eth1 active groups = %d, want 1", got)
 	}
 }
 
@@ -334,4 +345,24 @@ func TestServeShutdownError(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	close(done)
 	time.Sleep(50 * time.Millisecond)
+}
+
+// BenchmarkPacketForwarded exercises the integer-indexed hot path (one atomic
+// load + short-string map lookup + slice index + 4 counter ops), the metric
+// replaced the per-packet interface-keyed sync.Map lookups + active-group mutex.
+func BenchmarkPacketForwarded(b *testing.B) {
+	rec, err := New("bench", 4, "", 30*time.Second)
+	if err != nil {
+		b.Fatalf("metrics.New: %v", err)
+	}
+	for i := 0; i < 4; i++ { // warm all worker + group binds
+		for g := 0; g < 256; g++ {
+			rec.PacketForwarded("eth0", i, uint32(g), 256)
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rec.PacketForwarded("eth0", i&3, uint32(i&0xff), 256)
+	}
 }
