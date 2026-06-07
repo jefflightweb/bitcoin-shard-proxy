@@ -21,7 +21,7 @@ func BenchmarkProcessForward(b *testing.B) {
 	if err != nil {
 		b.Skipf("listen: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	egr := NewEgress(fw, []Target{{Iface: &net.Interface{Index: 1, Name: "lo"}, Conn: conn}}, 32, nil)
 
 	f := &frame.Frame{SeqNum: 5, Payload: make([]byte, 256)}
