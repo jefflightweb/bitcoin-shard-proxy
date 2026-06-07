@@ -7,6 +7,8 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/lightwebinc/shard-proxy)](https://goreportcard.com/report/github.com/lightwebinc/shard-proxy)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+> Part of the [**BSV Layered Multicast**](https://github.com/lightwebinc/bsv-multicast) open-source project — see the main repository for the full architecture, design docs, and BRC specifications.
+
 A high-throughput proxy that receives Bitcoin SV (BSV Blockchain) transaction
 frames (BRC-124, BRC-128, or legacy BRC-12) over UDP (or TCP for reliable delivery), derives
 an IPv6 multicast group address from the transaction ID, and retransmits to
