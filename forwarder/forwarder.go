@@ -147,6 +147,14 @@ type Forwarder struct {
 	bindSource   net.IP // optional; when non-nil egress sockets are syscall.Bind'd to this IPv6 so SSM receivers can pre-declare it
 	hopLimit     int    // IPV6_MULTICAST_HOPS for egress; 0 = leave kernel default (1)
 
+	// groupAddrs caches the multicast destination address by group index. The
+	// address is a pure function of (mcPrefix, mcGroupID, idx, egressPort) —
+	// invariant across resharding/bridging, which change the index a txid maps
+	// to, not the address of an index — so the cache never needs invalidation.
+	// Shared across worker goroutines; atomic per slot for lock-free lazy fill.
+	// Eliminates a per-packet net.UDPAddr allocation on the forward hot path.
+	groupAddrs []atomic.Pointer[net.UDPAddr]
+
 	// bridging is the optional secondary engine used during a BRC-137
 	// live-resharding bridging window. nil ⇒ single-emit (steady
 	// state); non-nil ⇒ dual-emit. Atomic so the applier can swap
@@ -256,11 +264,29 @@ func New(engine *shard.Engine, mcPrefix uint16, mcGroupID uint16, egressPort int
 		debug:      debug,
 		rec:        rec,
 		log:        slog.Default().With("component", "forwarder"),
+		groupAddrs: make([]atomic.Pointer[net.UDPAddr], maxGroupCache),
 	}
 	for i := range fw.chains {
 		fw.chains[i].m = make(map[chainKey]*flowState)
 	}
 	return fw
+}
+
+// addrFor returns the cached multicast destination *net.UDPAddr for group idx,
+// computing it via the shard engine and caching it on first use. The address of
+// an index is engine-independent, so this is also correct for bridging's
+// secondary-engine indices. The result is shared; callers must treat it as
+// read-only.
+func (fw *Forwarder) addrFor(idx uint32) *net.UDPAddr {
+	if idx >= uint32(len(fw.groupAddrs)) {
+		return fw.engine.Addr(idx, fw.egressPort)
+	}
+	if a := fw.groupAddrs[idx].Load(); a != nil {
+		return a
+	}
+	a := fw.engine.Addr(idx, fw.egressPort)
+	fw.groupAddrs[idx].Store(a)
+	return a
 }
 
 // OpenTargets opens one multicast egress UDP socket per interface and wraps
@@ -401,7 +427,7 @@ func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int
 		return
 	}
 
-	dst := fw.engine.Addr(groupIdx, fw.egressPort)
+	dst := fw.addrFor(groupIdx)
 	egr.EnqueueData(raw, *dst, groupIdx, workerID)
 
 	// BRC-137 live-resharding bridging: when a secondary engine is
@@ -416,7 +442,7 @@ func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int
 		// from the active group (so frames whose two indices collide
 		// are not literally doubled to the same address).
 		if bridgeIdx != groupIdx {
-			bridgeDst := bs.Secondary.Addr(bridgeIdx, fw.egressPort)
+			bridgeDst := fw.addrFor(bridgeIdx)
 			egr.EnqueueData(raw, *bridgeDst, bridgeIdx, workerID)
 		}
 	}
@@ -459,7 +485,7 @@ func (fw *Forwarder) fragment(egr *Egress, f *frame.Frame, ip [16]byte, groupIdx
 	}
 
 	fragTotal := uint16(k)
-	dst := fw.engine.Addr(groupIdx, fw.egressPort)
+	dst := fw.addrFor(groupIdx)
 
 	for i := 0; i < k; i++ {
 		start := i * dataSize

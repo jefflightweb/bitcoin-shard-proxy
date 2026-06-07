@@ -30,6 +30,11 @@ import (
 // returns. The verbatim forwarding path feeds bytes from a receive batch
 // whose buffers are reused only after Flush; fragment-path payloads come
 // from a per-Egress sync.Pool and are released back at Flush time.
+// maxGroupCache bounds the per-group destination-address caches. shardBits is
+// capped at 12, so group indices occupy [0, 4096). Out-of-range indices fall
+// back to per-packet allocation (never hit in practice).
+const maxGroupCache = 1 << 12
+
 type Egress struct {
 	targets []Target
 	pcs     []*ipv6.PacketConn
@@ -45,6 +50,17 @@ type Egress struct {
 	// EnqueueControlPooled. The slice is drained at Flush, returning each
 	// backing buffer to pool exactly once regardless of target count.
 	pooledBufs []*[]byte
+
+	// addrCache[i][groupIdx] is the per-target destination *net.UDPAddr
+	// (IP+Port+Zone) for a data frame in group groupIdx. The multicast
+	// address is a pure function of (mcPrefix, groupID, groupIdx, port) and
+	// the Zone is the fixed target iface, so a frame's destination never
+	// changes for a given (target, group) — even across resharding/bridging
+	// (which alter the group *index* a txid maps to, not the address of an
+	// index). Lazily filled on first sight, eliminating a per-packet
+	// per-target net.UDPAddr allocation on the egress hot path. Control
+	// frames (distinct dst, no group) bypass the cache.
+	addrCache [][]*net.UDPAddr
 
 	pool     *sync.Pool
 	poolSize int
@@ -76,13 +92,14 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 		batchHint = 1
 	}
 	e := &Egress{
-		targets:  targets,
-		pcs:      make([]*ipv6.PacketConn, len(targets)),
-		msgs:     make([][]ipv6.Message, len(targets)),
-		meta:     make([]msgMeta, 0, batchHint),
-		log:      slog.Default().With("component", "egress"),
-		rec:      rec,
-		throttle: logging.NewThrottle(5 * time.Second),
+		targets:   targets,
+		pcs:       make([]*ipv6.PacketConn, len(targets)),
+		msgs:      make([][]ipv6.Message, len(targets)),
+		meta:      make([]msgMeta, 0, batchHint),
+		addrCache: make([][]*net.UDPAddr, len(targets)),
+		log:       slog.Default().With("component", "egress"),
+		rec:       rec,
+		throttle:  logging.NewThrottle(5 * time.Second),
 	}
 	for i, tgt := range targets {
 		if tgt.PC != nil {
@@ -91,6 +108,7 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 			e.pcs[i] = ipv6.NewPacketConn(tgt.Conn)
 		}
 		e.msgs[i] = make([]ipv6.Message, 0, batchHint)
+		e.addrCache[i] = make([]*net.UDPAddr, maxGroupCache)
 	}
 	if fw != nil && fw.fragDataSize > 0 {
 		e.poolSize = frame.HeaderSizeV3 + fw.fragDataSize
@@ -166,8 +184,19 @@ func (e *Egress) enqueue(raw []byte, dst net.UDPAddr, m msgMeta, pooled *[]byte)
 	if pooled != nil {
 		e.pooledBufs = append(e.pooledBufs, pooled)
 	}
+	// Data frames address a stable per-(target, group) multicast destination,
+	// so cache it; control frames carry an arbitrary dst and always build fresh.
+	cacheable := m.ctrlLabel == "" && m.groupIdx < maxGroupCache
 	for i := range e.targets {
-		addr := &net.UDPAddr{IP: dst.IP, Port: dst.Port, Zone: e.targets[i].Iface.Name}
+		var addr *net.UDPAddr
+		if cacheable {
+			if addr = e.addrCache[i][m.groupIdx]; addr == nil {
+				addr = &net.UDPAddr{IP: dst.IP, Port: dst.Port, Zone: e.targets[i].Iface.Name}
+				e.addrCache[i][m.groupIdx] = addr
+			}
+		} else {
+			addr = &net.UDPAddr{IP: dst.IP, Port: dst.Port, Zone: e.targets[i].Iface.Name}
+		}
 		e.msgs[i] = append(e.msgs[i], ipv6.Message{
 			Buffers: [][]byte{raw},
 			Addr:    addr,
