@@ -132,11 +132,15 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 		return fmt.Errorf("worker %d: socket: %w", w.id, err)
 	}
 
-	// SO_REUSEPORT: allow all worker sockets to share the same port.
-	// The kernel distributes incoming datagrams across them.
-	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+	// Share the listen port across all worker sockets and have the kernel
+	// load-balance incoming datagrams across them. The option differs by OS:
+	// Linux SO_REUSEPORT load-balances; FreeBSD SO_REUSEPORT does not (it only
+	// permits the shared bind) and requires SO_REUSEPORT_LB for balancing —
+	// without it only a handful of workers receive. setReusePortLB picks the
+	// right one per platform (see reuseport_*.go).
+	if err := setReusePortLB(fd); err != nil {
 		_ = unix.Close(fd)
-		return fmt.Errorf("worker %d: SO_REUSEPORT: %w", w.id, err)
+		return fmt.Errorf("worker %d: reuseport: %w", w.id, err)
 	}
 
 	// Enlarge the receive buffer to absorb bursts of transaction datagrams.
