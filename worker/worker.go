@@ -42,7 +42,6 @@ import (
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
-	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-proxy/forwarder"
 	"github.com/lightwebinc/shard-proxy/metrics"
 )
@@ -263,16 +262,7 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 			if w.rec != nil && len(targets) > 0 {
 				w.rec.PacketReceived(ifaceName, w.id, n)
 			}
-			switch {
-			case n > 6 && buf[6] == frame.FrameVerV4:
-				w.fwd.ProcessBlock(egr, buf[:n], src, w.id)
-			case n > 6 && buf[6] == frame.FrameVerV5:
-				w.fwd.ProcessSubtreeData(egr, buf[:n], src, w.id)
-			case n > 6 && buf[6] == frame.FrameVerV6:
-				w.fwd.ProcessAnchor(egr, buf[:n], src, w.id)
-			default:
-				w.fwd.Process(egr, buf[:n], src, w.id)
-			}
+			w.fwd.Dispatch(egr, buf[:n], src, w.id)
 		}
 
 		egr.Flush()

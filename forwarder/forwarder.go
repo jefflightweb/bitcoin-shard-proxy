@@ -321,6 +321,27 @@ func (fw *Forwarder) SetFragMTU(mtu int) {
 	}
 }
 
+// Dispatch routes one ingress datagram to the correct Process* entry point by
+// its BRC frame-version byte (raw[6]). It is the single source of truth for
+// frame-version routing, shared by the worker receive loop and any alternative
+// ingress that drives the forwarder directly, so version handling cannot drift
+// between callers. raw is the UDP payload (the BRC frame); src is its source;
+// egr is the caller's per-worker egress queue. raw must remain valid until
+// egr.Flush returns.
+func (fw *Forwarder) Dispatch(egr *Egress, raw []byte, src net.Addr, workerID int) {
+	n := len(raw)
+	switch {
+	case n > 6 && raw[6] == frame.FrameVerV4:
+		fw.ProcessBlock(egr, raw, src, workerID)
+	case n > 6 && raw[6] == frame.FrameVerV5:
+		fw.ProcessSubtreeData(egr, raw, src, workerID)
+	case n > 6 && raw[6] == frame.FrameVerV6:
+		fw.ProcessAnchor(egr, raw, src, workerID)
+	default:
+		fw.Process(egr, raw, src, workerID)
+	}
+}
+
 // Process is the hot path: decode raw for routing, conditionally stamp
 // HashKey/SeqNum, then enqueue into egr for batched egress via Egress.Flush.
 //
