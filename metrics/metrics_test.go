@@ -106,23 +106,81 @@ func TestWorkerReadyDone(t *testing.T) {
 
 // ── flowCounters cache ────────────────────────────────────────────────────────
 
-func TestFlowCountersCacheHit(t *testing.T) {
-	rec := newTestRecorder(t, 1)
+func groupSum(st *ifaceState, groupIdx uint32) (uint64, uint64) {
+	ft := st.flows.Load()
+	if int(groupIdx) >= len(ft.groups) || ft.groups[groupIdx] == nil {
+		return 0, 0
+	}
+	gs := ft.groups[groupIdx]
+	var p, b uint64
+	for i := range gs.perWorker {
+		p += gs.perWorker[i].packets.Load()
+		b += gs.perWorker[i].bytes.Load()
+	}
+	return p, b
+}
+
+// TestFlowShardingSumsAcrossWorkers verifies the per-worker shards are summed
+// per group (no worker dimension leaks into the exposed counter).
+func TestFlowShardingSumsAcrossWorkers(t *testing.T) {
+	rec := newTestRecorder(t, 4)
+	rec.PacketForwarded("eth0", 0, 7, 100)
+	rec.PacketForwarded("eth0", 1, 7, 100) // same group, different worker
+	rec.PacketForwarded("eth0", 3, 7, 50)
 	st := rec.ifaceState("eth0")
-	p1, b1 := st.flow(rec, 7)
-	p2, b2 := st.flow(rec, 7)
-	if p1 != p2 || b1 != b2 {
-		t.Error("flow returned different handles for same key; cache miss on second call")
+	if p, b := groupSum(st, 7); p != 3 || b != 250 {
+		t.Errorf("group 7 sum = (%d pkts, %d bytes), want (3, 250)", p, b)
+	}
+	if p, _ := groupSum(st, 9); p != 0 {
+		t.Errorf("untouched group 9 = %d, want 0", p)
 	}
 }
 
-func TestFlowCountersCacheMiss(t *testing.T) {
-	rec := newTestRecorder(t, 1)
-	st := rec.ifaceState("eth0")
-	p1, _ := st.flow(rec, 1)
-	p2, _ := st.flow(rec, 2)
-	if p1 == p2 {
-		t.Error("flow returned same handle for different groups")
+// TestFlowCollectorSumsAtScrape verifies the custom collector exposes the
+// per-worker shards summed into the unchanged bsp_flow_*{iface,group} schema.
+func TestFlowCollectorSumsAtScrape(t *testing.T) {
+	rec := newTestRecorder(t, 4)
+	rec.PacketForwarded("eth0", 0, 5, 100)
+	rec.PacketForwarded("eth0", 1, 5, 100) // same group, different worker
+	rec.PacketForwarded("eth0", 3, 5, 50)
+
+	mfs, err := rec.promReg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var pkts, bytes float64
+	var found bool
+	for _, mf := range mfs {
+		name := mf.GetName()
+		if name != "bsp_flow_packets_total" && name != "bsp_flow_bytes_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			grp := ""
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "group" {
+					grp = l.GetValue()
+				}
+			}
+			if grp != "0005" {
+				continue
+			}
+			found = true
+			if name == "bsp_flow_packets_total" {
+				pkts = m.GetCounter().GetValue()
+			} else {
+				bytes = m.GetCounter().GetValue()
+			}
+		}
+	}
+	if !found {
+		t.Fatal("bsp_flow_*{group=0005} not exposed")
+	}
+	if pkts != 3 {
+		t.Errorf("summed packets = %v, want 3", pkts)
+	}
+	if bytes != 250 {
+		t.Errorf("summed bytes = %v, want 250", bytes)
 	}
 }
 
@@ -130,8 +188,8 @@ func TestFlowCountersCacheMiss(t *testing.T) {
 
 func activeGroupCount(st *ifaceState) int {
 	n := 0
-	for _, c := range st.flows.Load().packets {
-		if c != nil {
+	for _, gs := range st.flows.Load().groups {
+		if gs != nil {
 			n++
 		}
 	}
@@ -141,11 +199,11 @@ func activeGroupCount(st *ifaceState) int {
 func TestActiveGroupTracking(t *testing.T) {
 	rec := newTestRecorder(t, 1)
 	st0 := rec.ifaceState("eth0")
-	st0.flow(rec, 1)
-	st0.flow(rec, 2)
-	st0.flow(rec, 1) // duplicate — should not bind a new group
+	st0.addFlow(0, 1, 64)
+	st0.addFlow(0, 2, 64)
+	st0.addFlow(0, 1, 64) // duplicate group — should not bind a new shard
 	st1 := rec.ifaceState("eth1")
-	st1.flow(rec, 1)
+	st1.addFlow(0, 1, 64)
 
 	if got := activeGroupCount(st0); got != 2 {
 		t.Errorf("eth0 active groups = %d, want 2", got)

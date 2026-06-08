@@ -70,17 +70,33 @@ var Version = "dev"
 // large share of CPU on the zero-copy hot path): the hot path now costs one
 // atomic load + a short-string map lookup + slice indexing.
 type ifaceState struct {
-	iface   string
-	workers []*hotPathCounters        // indexed by workerID; bound on first use
-	flows   atomic.Pointer[flowTable] // COW, indexed by groupIdx
-	mu      sync.Mutex                // guards worker binding + flow COW grow
+	iface      string
+	numWorkers int
+	workers    []*hotPathCounters        // indexed by workerID; bound on first use
+	flows      atomic.Pointer[flowTable] // COW, indexed by groupIdx
+	mu         sync.Mutex                // guards worker binding + flow COW grow
 }
 
-// flowTable is an immutable (copy-on-write) per-group counter table indexed by
-// group index. Stored behind ifaceState.flows so reads are lock-free.
+// flowTable is an immutable (copy-on-write) per-group table indexed by group
+// index. Stored behind ifaceState.flows so reads are lock-free. Each group's
+// counters are sharded per worker so the hot-path increment is single-writer
+// (uncontended); the flowCollector sums across workers at scrape time, keeping
+// the exposed bsp_flow_*{iface,group} schema unchanged.
 type flowTable struct {
-	packets []promclient.Counter
-	bytes   []promclient.Counter
+	groups []*groupShard // indexed by groupIdx; nil = group never seen
+}
+
+// groupShard holds one shard counter cell per worker for a single group.
+type groupShard struct {
+	perWorker []flowCell // indexed by workerID; only that worker writes its cell
+}
+
+// flowCell is one (group, worker) packet/byte counter pair. atomic so the
+// scrape goroutine can Load while the owning worker Adds; single-writer means
+// no cross-core contention on the Add.
+type flowCell struct {
+	packets atomic.Uint64
+	bytes   atomic.Uint64
 }
 
 // hotPathCounters bundles the pre-bound prometheus.Counter handles for a
@@ -124,9 +140,11 @@ type Recorder struct {
 	promTxEgressErrs  *promclient.CounterVec
 	promTxIngressErrs *promclient.CounterVec
 
-	// Per-flow / per-group — labels: iface, group (no worker dimension).
-	promFlowPackets *promclient.CounterVec
-	promFlowBytes   *promclient.CounterVec
+	// Per-flow / per-group — exposed as labels: iface, group. Backed by a
+	// per-worker-sharded counter store summed at scrape by flowCollector, so the
+	// hot-path increment is single-writer (no cross-core contention).
+	flowPacketsDesc *promclient.Desc
+	flowBytesDesc   *promclient.Desc
 
 	// Per-interface integer-indexed hot-path cache. Reads are lock-free (one
 	// atomic load + a short-string map lookup + slice index); first sight of an
@@ -305,19 +323,17 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsp_ingress_errors_total",
 		Help: "ReadFrom non-fatal errors on ingress socket",
 	}, []string{"worker", "network_interface_name"})
-	r.promFlowPackets = promclient.NewCounterVec(promclient.CounterOpts{
-		Name: "bsp_flow_packets_total",
-		Help: "Packets per shard group per interface (active groups only)",
-	}, []string{"network_interface_name", "group"})
-	r.promFlowBytes = promclient.NewCounterVec(promclient.CounterOpts{
-		Name: "bsp_flow_bytes_total",
-		Help: "Bytes per shard group per interface (active groups only)",
-	}, []string{"network_interface_name", "group"})
+	r.flowPacketsDesc = promclient.NewDesc("bsp_flow_packets_total",
+		"Packets per shard group per interface (active groups only)",
+		[]string{"network_interface_name", "group"}, nil)
+	r.flowBytesDesc = promclient.NewDesc("bsp_flow_bytes_total",
+		"Bytes per shard group per interface (active groups only)",
+		[]string{"network_interface_name", "group"}, nil)
 	for _, c := range []promclient.Collector{
 		r.promRxPackets, r.promRxBytes, r.promRxDrops, r.promRxSize,
 		r.promTxPackets, r.promTxBytes,
 		r.promTxEgressErrs, r.promTxIngressErrs,
-		r.promFlowPackets, r.promFlowBytes,
+		&flowCollector{r: r},
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("metrics: register hot-path counter: %w", err)
@@ -331,8 +347,8 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 			if m := r.ifaceStates.Load(); m != nil {
 				for iface, st := range *m {
 					n := 0
-					for _, c := range st.flows.Load().packets {
-						if c != nil {
+					for _, gs := range st.flows.Load().groups {
+						if gs != nil {
 							n++
 						}
 					}
@@ -450,9 +466,7 @@ func (r *Recorder) PacketForwarded(iface string, workerID int, groupIdx uint32, 
 	c.txPackets.Inc()
 	c.txBytes.Add(float64(size))
 
-	fp, fb := st.flow(r, groupIdx)
-	fp.Inc()
-	fb.Add(float64(size))
+	st.addFlow(workerID, groupIdx, uint64(size))
 }
 
 // FrameFragmented records one frame that exceeded the fragmentation threshold.
@@ -658,7 +672,11 @@ func (r *Recorder) ifaceState(iface string) *ifaceState {
 			return st
 		}
 	}
-	st := &ifaceState{iface: iface, workers: make([]*hotPathCounters, r.numWorkers)}
+	nw := r.numWorkers
+	if nw < 1 {
+		nw = 1
+	}
+	st := &ifaceState{iface: iface, numWorkers: nw, workers: make([]*hotPathCounters, nw)}
 	st.flows.Store(&flowTable{})
 	nm := make(map[string]*ifaceState)
 	if old := r.ifaceStates.Load(); old != nil {
@@ -699,35 +717,75 @@ func (st *ifaceState) worker(r *Recorder, workerID int) *hotPathCounters {
 	return hp
 }
 
-// flow returns the (packets, bytes) counters for groupIdx, binding via a
-// copy-on-write grow of the flow table on first sight. Reads are lock-free; the
-// table doubles as the active-group set (non-nil entry == group seen).
-func (st *ifaceState) flow(r *Recorder, groupIdx uint32) (promclient.Counter, promclient.Counter) {
+// addFlow increments this worker's shard of the (group) counters. The cell is
+// single-writer (only workerID touches it) so the Add is uncontended; the group
+// shard is bound via copy-on-write on first sight. Reads are lock-free.
+func (st *ifaceState) addFlow(workerID int, groupIdx uint32, size uint64) {
 	ft := st.flows.Load()
-	if int(groupIdx) < len(ft.packets) {
-		if p := ft.packets[groupIdx]; p != nil {
-			return p, ft.bytes[groupIdx]
-		}
+	var gs *groupShard
+	if int(groupIdx) < len(ft.groups) {
+		gs = ft.groups[groupIdx]
 	}
+	if gs == nil {
+		gs = st.bindFlow(groupIdx)
+	}
+	if workerID >= 0 && workerID < len(gs.perWorker) {
+		gs.perWorker[workerID].packets.Add(1)
+		gs.perWorker[workerID].bytes.Add(size)
+	}
+}
+
+// bindFlow installs (copy-on-write) the per-worker shard for groupIdx.
+func (st *ifaceState) bindFlow(groupIdx uint32) *groupShard {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	ft = st.flows.Load()
-	if int(groupIdx) < len(ft.packets) && ft.packets[groupIdx] != nil {
-		return ft.packets[groupIdx], ft.bytes[groupIdx]
+	ft := st.flows.Load()
+	if int(groupIdx) < len(ft.groups) && ft.groups[groupIdx] != nil {
+		return ft.groups[groupIdx]
 	}
-	n := len(ft.packets)
+	n := len(ft.groups)
 	if int(groupIdx)+1 > n {
 		n = int(groupIdx) + 1
 	}
-	np := make([]promclient.Counter, n)
-	nb := make([]promclient.Counter, n)
-	copy(np, ft.packets)
-	copy(nb, ft.bytes)
-	groupStr := fmt.Sprintf("%04x", groupIdx)
-	np[groupIdx] = r.promFlowPackets.WithLabelValues(st.iface, groupStr)
-	nb[groupIdx] = r.promFlowBytes.WithLabelValues(st.iface, groupStr)
-	st.flows.Store(&flowTable{packets: np, bytes: nb})
-	return np[groupIdx], nb[groupIdx]
+	ng := make([]*groupShard, n)
+	copy(ng, ft.groups) // copies *groupShard pointers, not the atomic cells
+	gs := &groupShard{perWorker: make([]flowCell, st.numWorkers)}
+	ng[groupIdx] = gs
+	st.flows.Store(&flowTable{groups: ng})
+	return gs
+}
+
+// flowCollector exposes the per-worker-sharded flow counters as the
+// bsp_flow_{packets,bytes}_total{network_interface_name,group} series, summing
+// each group's worker shards at scrape time. Reads are atomic Loads concurrent
+// with hot-path Adds (safe; no torn reads).
+type flowCollector struct{ r *Recorder }
+
+func (fc *flowCollector) Describe(ch chan<- *promclient.Desc) {
+	ch <- fc.r.flowPacketsDesc
+	ch <- fc.r.flowBytesDesc
+}
+
+func (fc *flowCollector) Collect(ch chan<- promclient.Metric) {
+	m := fc.r.ifaceStates.Load()
+	if m == nil {
+		return
+	}
+	for iface, st := range *m {
+		for g, gs := range st.flows.Load().groups {
+			if gs == nil {
+				continue
+			}
+			var pkts, bytes uint64
+			for i := range gs.perWorker {
+				pkts += gs.perWorker[i].packets.Load()
+				bytes += gs.perWorker[i].bytes.Load()
+			}
+			grp := fmt.Sprintf("%04x", g)
+			ch <- promclient.MustNewConstMetric(fc.r.flowPacketsDesc, promclient.CounterValue, float64(pkts), iface, grp)
+			ch <- promclient.MustNewConstMetric(fc.r.flowBytesDesc, promclient.CounterValue, float64(bytes), iface, grp)
+		}
+	}
 }
 
 // ── HTTP server ──────────────────────────────────────────────────────────────
