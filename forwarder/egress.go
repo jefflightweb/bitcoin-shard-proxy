@@ -204,6 +204,40 @@ func (e *Egress) enqueue(raw []byte, dst net.UDPAddr, m msgMeta, pooled *[]byte)
 	}
 }
 
+// EgressWriteFunc delivers one queued datagram — the BRC frame payload raw to
+// multicast destination dst — for target index target. Returning a non-nil
+// error stops that target's drain and is recorded like a sendmmsg write error.
+type EgressWriteFunc func(target int, raw []byte, dst *net.UDPAddr) error
+
+// FlushVia drains the per-batch egress queue through fn instead of the kernel
+// WriteBatch (sendmmsg) path, then resets the queue and releases pooled buffers
+// exactly like Flush, recording forwarded/dropped metrics identically. It lets
+// an alternative egress transport reuse the forwarder's decode/stamp/addressing
+// pipeline without forking it.
+func (e *Egress) FlushVia(fn EgressWriteFunc) {
+	for i := range e.targets {
+		sent := 0
+		var werr error
+		for j := range e.msgs[i] {
+			m := &e.msgs[i][j]
+			dst, _ := m.Addr.(*net.UDPAddr)
+			if err := fn(i, m.Buffers[0], dst); err != nil {
+				werr = err
+				break
+			}
+			sent++
+		}
+		e.recordWrite(i, sent, werr)
+		clear(e.msgs[i])
+		e.msgs[i] = e.msgs[i][:0]
+	}
+	for _, p := range e.pooledBufs {
+		e.pool.Put(p)
+	}
+	e.pooledBufs = e.pooledBufs[:0]
+	e.meta = e.meta[:0]
+}
+
 // Flush writes all queued messages to each target via WriteBatch (sendmmsg
 // on Linux; per-packet fallback elsewhere). Per-target write errors are
 // recorded as EgressError; messages beyond WriteBatch's sent-count fire
