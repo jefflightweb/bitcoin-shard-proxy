@@ -46,7 +46,7 @@ range (RFC 4607). The egress socket is bound to `-bind-source`
 (a distinct IPv6 per replica) so SSM receivers can pre-declare this
 proxy in their `(S,G)` join calls — anycast / ECMP-shared sources
 break PIM-SSM RPF. See the
-[SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md)
+[SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
 for fabric prerequisites (PIM-SSM, MLDv2, raised `mld_max_msf`).
 
 ## Control Groups
@@ -310,12 +310,12 @@ Shutdown proceeds in two phases when `SIGINT` or `SIGTERM` is received:
    all goroutines via `sync.WaitGroup`, then flushes the OTLP exporter
    before returning.
 
-## BRC-137 Manifest Consumer (auto-shard-config)
+## BRC-139 Manifest Consumer (auto-shard-config)
 
 Off by default; enabled with `-manifest-consumer-enabled`. When on, the
 proxy opens a **dedicated beacon-receive socket** on the beacon group
 (`FFxx::B:FFFD`) — unlike the listener, the proxy is not otherwise a
-multicast subscriber — decodes BRC-137 ShardManifest datagrams into the
+multicast subscriber — decodes BRC-139 ShardManifest datagrams into the
 shared `shard-common/manifest` `Registry`, and runs the `Evaluator` on a
 1 s tick. Adoption requires `≥ -pilot-quorum` distinct `Authoritative`
 announcers agreeing for the hysteresis window; manual CLI values always
@@ -336,8 +336,8 @@ Two adoption modes, selected by `-live-resharding`:
   duplicates. Cutover follows the pilot's Successor-block `TransitionEpoch`
   (floored by `-bridging-window`).
 
-Flag reference and fail-closed rules: [configuration.md](configuration.md#auto-shard-config-brc-137).
-System-level design: [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/AutoShardConfig/auto-shard-config-plan.md).
+Flag reference and fail-closed rules: [configuration.md](configuration.md#auto-shard-config-brc-139).
+System-level design: [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration).
 
 ## Logging & Tracing
 
@@ -384,7 +384,7 @@ shard-proxy/
                      (ReadBatch) with frame-version dispatch for BRC-131/
                      BRC-132/BRC-134 (worker.go); TCP ingress listener with
                      BRC-127 routing (tcp.go)
-  manifest/          opt-in BRC-137 consumer: beacon-receive listener +
+  manifest/          opt-in BRC-139 consumer: beacon-receive listener +
                      applier (restart-on-adopt or BridgingEngine dual-emit)
   metrics/           OTel + Prometheus instrumentation
 ```

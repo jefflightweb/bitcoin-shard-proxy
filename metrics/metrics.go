@@ -182,7 +182,7 @@ type Recorder struct {
 	tcpIngressRequired atomic.Bool
 	tcpIngressReady    atomic.Bool
 
-	// BRC-137 manifest consumer metrics. Updated by the proxy's
+	// BRC-139 manifest consumer metrics. Updated by the proxy's
 	// auto-config subsystem (shard-proxy/manifest).
 	manifestReceived      atomic.Int64
 	manifestPilotsKnown   atomic.Int64
@@ -555,7 +555,7 @@ func (r *Recorder) WorkerDone() {
 	r.readyCount.Add(-1)
 }
 
-// ManifestReceived increments the BRC-137 receive counter. nil-safe.
+// ManifestReceived increments the BRC-139 receive counter. nil-safe.
 func (r *Recorder) ManifestReceived() {
 	if r == nil {
 		return

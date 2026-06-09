@@ -27,7 +27,7 @@ sender  ──UDP/TCP──►  shard-proxy  ──UDP multicast──►  FF05:
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — system overview, multi-CPU design, graceful shutdown, BRC-137 manifest consumer, package structure
+- [Architecture](docs/architecture.md) — system overview, multi-CPU design, graceful shutdown, BRC-139 manifest consumer, package structure
 - [Configuration](docs/configuration.md) — all flags, environment variables, ingress modes, drain timeout
 
 ## Dependencies
@@ -71,7 +71,7 @@ With TCP ingress enabled:
   -tcp-listen-port  9100
 ```
 
-With Source-Specific Multicast (RFC 4607) — see [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md):
+With Source-Specific Multicast (RFC 4607) — see [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm):
 
 ```bash
 ./shard-proxy \
@@ -87,7 +87,7 @@ With Source-Specific Multicast (RFC 4607) — see [SSM Support Plan](https://git
 mandatory in SSM mode and MUST differ across replicas — anycast or
 ECMP-shared sources break PIM-SSM RPF.
 
-With opt-in BRC-137 auto-shard-config (manifest-driven `ShardBits` adoption) — see [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/AutoShardConfig/auto-shard-config-plan.md):
+With opt-in BRC-139 auto-shard-config (manifest-driven `ShardBits` adoption) — see [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration):
 
 ```bash
 ./shard-proxy \
@@ -97,7 +97,7 @@ With opt-in BRC-137 auto-shard-config (manifest-driven `ShardBits` adoption) —
   -pilot-quorum                2
 ```
 
-Default behavior is restart-on-adopt; add `-live-resharding` for the dual-emit bridging path. See [docs/architecture.md](docs/architecture.md#brc-137-manifest-consumer-auto-shard-config) for the consumer subsystem.
+Default behavior is restart-on-adopt; add `-live-resharding` for the dual-emit bridging path. See [docs/architecture.md](docs/architecture.md#brc-139-manifest-consumer-auto-shard-config) for the consumer subsystem.
 
 With JSON structured logging for fleet aggregation (and opt-in tracing) — see [Unified Logging Plan](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md):
 

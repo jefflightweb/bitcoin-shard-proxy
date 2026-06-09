@@ -15,7 +15,7 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-shard-bits` | `SHARD_BITS` | `2` | Key bit width (1–15) |  |  |  |
 | `-scope` | `MC_SCOPE` | `site` | Multicast scope: `link` \ | `site` \ | `org` \ | `global` |
 | `-mc-group-id` | `MC_GROUP_ID` | `0x000B` | IANA group-id (bytes 12–13); default = IANA Bitcoin allocation `FF0X::B` |  |  |  |
-| `-source-mode` | `SOURCE_MODE` | `asm` | Multicast addressing model: `asm` (FF0x; default) or `ssm` (FF3x per RFC 4607). SSM derives the prefix via `shard.Prefix(SSM, scope)` → FF35 site / FF3E global; RFC 8815 deprecates ASM at global scope and is rejected. Requires PIM-SSM in the fabric. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md). |  |  |  |
+| `-source-mode` | `SOURCE_MODE` | `asm` | Multicast addressing model: `asm` (FF0x; default) or `ssm` (FF3x per RFC 4607). SSM derives the prefix via `shard.Prefix(SSM, scope)` → FF35 site / FF3E global; RFC 8815 deprecates ASM at global scope and is rejected. Requires PIM-SSM in the fabric. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm). |  |  |  |
 | `-bind-source` | `BIND_SOURCE` | `""` | IPv6 literal bound on every multicast egress socket via `syscall.Bind` in `openEgressSocket`. **Required when `-source-mode=ssm`** and MUST be distinct per replica — anycast/ECMP-shared sources break PIM-SSM RPF. For single-identity deployments use VRRP active-standby. |  |  |  |
 | `-workers` | `NUM_WORKERS` | `runtime.NumCPU()` | Worker goroutine count (0 = NumCPU) |  |  |  |
 | `-debug` | `DEBUG` | `false` | Enable per-packet debug logging and multicast loopback |  |  |  |
@@ -304,13 +304,13 @@ single upstream feed). Leave it on for any multi-proxy or bridged topology.
   tier-2 SETNX outcomes.
 - `bsp_txid_claim_errors_total{prefix}` — Redis errors (fail-open).
 
-## Auto-Shard-Config (BRC-137)
+## Auto-Shard-Config (BRC-139)
 
-Optional consumer of BRC-137 ShardManifest announcements. Default off
+Optional consumer of BRC-139 ShardManifest announcements. Default off
 (legacy behavior unchanged); opt-in via `-manifest-consumer-enabled`.
 Unlike the listener, the proxy does not currently join the beacon
 group — enabling auto-config adds a dedicated beacon-receive socket.
-See the [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/AutoShardConfig/auto-shard-config-plan.md)
+See the [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
 for the system-level design.
 
 ### `-manifest-consumer-enabled` / `MANIFEST_CONSUMER_ENABLED` (default: `false`)
@@ -342,12 +342,12 @@ Multicast scope for the beacon-group join. Empty inherits `-scope`.
 
 ### `-manifest-beacon-port` / `MANIFEST_BEACON_PORT` (default: `9001`)
 
-UDP port on which the proxy joins the beacon group to receive BRC-137
+UDP port on which the proxy joins the beacon group to receive BRC-139
 manifests. Matches the shard-manifest daemon's `-port`.
 
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
-Opt-in BRC-137 bridging mode. When false (default), a `ShardBits` or
+Opt-in BRC-139 bridging mode. When false (default), a `ShardBits` or
 `SourceModeSSM` adoption triggers a graceful restart (the manifest
 applier writes into the internal restart-signal channel, which the
 main signal-select handles as an early SIGTERM so the standard drain

@@ -115,7 +115,7 @@ type TxidDedup interface {
 // destination from the TxID, stamps HashKey/SeqNum for BRC-124/BRC-128 frames, and
 // optionally splits large payloads into BRC-130 fragment datagrams.
 // BridgingEngine carries the secondary shard engine used during a
-// BRC-137 live-resharding bridging window. When set on a Forwarder via
+// BRC-139 live-resharding bridging window. When set on a Forwarder via
 // SetBridging, the per-frame emit path computes both the active and the
 // bridging shard indices and emits to BOTH destinations. The listener's
 // per-TxID egress dedup absorbs the duplicate frame on the receive side.
@@ -155,7 +155,7 @@ type Forwarder struct {
 	// Eliminates a per-packet net.UDPAddr allocation on the forward hot path.
 	groupAddrs []atomic.Pointer[net.UDPAddr]
 
-	// bridging is the optional secondary engine used during a BRC-137
+	// bridging is the optional secondary engine used during a BRC-139
 	// live-resharding bridging window. nil ⇒ single-emit (steady
 	// state); non-nil ⇒ dual-emit. Atomic so the applier can swap
 	// without locking the hot path.
@@ -177,7 +177,7 @@ type Forwarder struct {
 	chains [chainStripes]chainStripe
 }
 
-// SetBridging publishes (or clears) the BRC-137 live-resharding
+// SetBridging publishes (or clears) the BRC-139 live-resharding
 // bridging engine. Safe to call from any goroutine; the per-frame
 // emit path reads the pointer atomically.
 //
@@ -430,7 +430,7 @@ func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int
 	dst := fw.addrFor(groupIdx)
 	egr.EnqueueData(raw, *dst, groupIdx, workerID)
 
-	// BRC-137 live-resharding bridging: when a secondary engine is
+	// BRC-139 live-resharding bridging: when a secondary engine is
 	// published, dual-emit to the successor layout as well. The
 	// listener's per-TxID egress dedup collapses the duplicate frame
 	// on the receive side. One extra atomic.Pointer.Load + (if

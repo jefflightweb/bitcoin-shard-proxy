@@ -1,4 +1,4 @@
-// Package manifest implements the proxy-side BRC-137 manifest consumer.
+// Package manifest implements the proxy-side BRC-139 manifest consumer.
 // Unlike the listener (which already had a beacon socket for BRC-126
 // ADVERTs), the proxy has no prior reason to join the beacon group; this
 // package owns a dedicated socket that reads only manifests (MsgType

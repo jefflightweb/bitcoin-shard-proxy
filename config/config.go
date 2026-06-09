@@ -138,7 +138,7 @@ type Config struct {
 	TxidDedupTTL           time.Duration
 	TxidDedupLocalCap      int
 
-	// Auto-shard-config (BRC-137 manifest consumer). All fields are opt-in.
+	// Auto-shard-config (BRC-139 manifest consumer). All fields are opt-in.
 	// When AutoConfigEnabled is false, the proxy does not join the beacon
 	// group at all and the other fields are ignored. When true, the proxy
 	// opens a beacon socket (posture-aware) and runs the manifest evaluator.
@@ -147,7 +147,7 @@ type Config struct {
 	AutoConfigPilotQuorum    int           // default 2
 	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval
 	AutoConfigBeaconScope    string        // "" ⇒ inherit MCScope
-	AutoConfigBeaconPort     int           // default 9001 (BRC-137 manifest port)
+	AutoConfigBeaconPort     int           // default 9001 (BRC-139 manifest port)
 	AutoConfigLiveResharding bool          // opt-in bridging mode (default: restart-on-adopt)
 	AutoConfigBridgingWindow time.Duration // 0 ⇒ honour pilot TransitionEpoch
 }
@@ -235,7 +235,7 @@ func Load() (*Config, error) {
 		"txid prefix bit width used as the shard key (1–15)")
 
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
-		"opt-in BRC-137 manifest consumer for auto-shard-config (off by default)")
+		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
 	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),
 		"manifest bootstrap behavior: 'optional' (default) | 'required' (refuse data-plane bind until quorum)")
 	flag.IntVar(&c.AutoConfigPilotQuorum, "pilot-quorum", envInt("PILOT_QUORUM", 2),
@@ -245,9 +245,9 @@ func Load() (*Config, error) {
 	flag.StringVar(&c.AutoConfigBeaconScope, "manifest-beacon-scope", envStr("MANIFEST_BEACON_SCOPE", ""),
 		"multicast scope for the beacon-group join; empty ⇒ inherit -scope")
 	flag.IntVar(&c.AutoConfigBeaconPort, "manifest-beacon-port", envInt("MANIFEST_BEACON_PORT", 9001),
-		"UDP port on which the proxy joins the beacon group to receive BRC-137 manifests")
+		"UDP port on which the proxy joins the beacon group to receive BRC-139 manifests")
 	flag.BoolVar(&c.AutoConfigLiveResharding, "live-resharding", envBool("LIVE_RESHARDING", false),
-		"opt-in BRC-137 live-resharding bridging mode (default: restart on ShardBits adoption)")
+		"opt-in BRC-139 live-resharding bridging mode (default: restart on ShardBits adoption)")
 	flag.DurationVar(&c.AutoConfigBridgingWindow, "bridging-window", envDuration("BRIDGING_WINDOW", 0),
 		"local floor on bridging duration; 0 ⇒ honour pilot TransitionEpoch verbatim")
 

@@ -271,7 +271,7 @@ func main() {
 		}()
 	}
 
-	// ── BRC-137 manifest consumer (auto-shard-config) ────────────────────
+	// ── BRC-139 manifest consumer (auto-shard-config) ────────────────────
 	// Optional, off by default. When enabled, the proxy opens a beacon
 	// socket and runs the manifest evaluator. A ShardBits/SourceMode
 	// adoption triggers a restart by writing into restartSig, which the

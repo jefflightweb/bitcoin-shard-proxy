@@ -578,7 +578,7 @@ func TestProbeEgressSocketClosedConn(t *testing.T) {
 	_ = probeEgressSocket(slog.Default(), conn, iface)
 }
 
-// ── BRC-137 live-resharding bridging ────────────────────────────────────────
+// ── BRC-139 live-resharding bridging ────────────────────────────────────────
 
 func TestForwarder_Bridging_DualEmitOnDistinctIndices(t *testing.T) {
 	// Active SB=8, Successor SB=9. A TxID with the 9th bit = 1 gives
