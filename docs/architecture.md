@@ -8,9 +8,7 @@ address from each transaction's txid (or routes to a fixed control-plane group f
 BRC-131/BRC-132/BRC-134), then retransmits the original bytes verbatim to all configured
 egress interfaces.
 
-Foundational concepts (shard hierarchy, anycast ingress, frame versions) live in
-[multicast-skills/architecture.md](../../multicast-skills/architecture.md) and
-[multicast-skills/protocol.md](../../multicast-skills/protocol.md); BRC wire formats in
+BRC wire formats live in
 [bsv-multicast/docs/](../../bsv-multicast/docs/).
 
 ```text
