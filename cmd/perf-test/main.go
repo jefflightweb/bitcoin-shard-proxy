@@ -35,7 +35,12 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-proxy/cmd/internal/latstamp"
 )
+
+// stampSeq is the global latency-stamp sequence counter, shared across sender
+// workers so seq values are unique per run.
+var stampSeq atomic.Uint32
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -53,6 +58,9 @@ type config struct {
 	Receivers  []string
 	Output     string
 	Senders    int
+
+	LatencyStamp bool
+	StampEvery   int
 }
 
 func parseFlags() *config {
@@ -68,6 +76,10 @@ func parseFlags() *config {
 	recvFlag := flag.String("receivers", "recv1,recv2,recv3", "comma-separated receiver VM names")
 	flag.StringVar(&c.Output, "output", "report.md", "output report file path")
 	flag.IntVar(&c.Senders, "senders", 1, "number of concurrent sender goroutines (each targets pps/senders)")
+	flag.BoolVar(&c.LatencyStamp, "latency-stamp", false,
+		"embed latency stamps (latstamp magic+nanos+seq) at the payload head for latency-sink")
+	flag.IntVar(&c.StampEvery, "stamp-every", 1,
+		"stamp every Nth frame (sampling keeps stamping cost negligible at high pps)")
 	flag.Parse()
 
 	c.ShardBits = *bits
@@ -497,6 +509,14 @@ func sendFramesWorker(ctx context.Context, cfg *config, workerID int, targetPPS 
 		// Fill payload with random bytes.
 		f.Payload = buf[frame.HeaderSize : frame.HeaderSize+payloadSize]
 		fillRand(f.Payload)
+
+		// Latency stamp: overwrite the payload head on every Nth frame. The
+		// payload stays opaque to the datapath; latency-sink (or the host-pcap
+		// analyzer) recognizes the magic. Stamps use CLOCK_REALTIME — see
+		// cmd/internal/latstamp.
+		if cfg.LatencyStamp && framesSent%int64(cfg.StampEvery) == 0 {
+			latstamp.Put(f.Payload, time.Now().UnixNano(), uint32(stampSeq.Add(1)))
+		}
 
 		n, err := frame.Encode(f, buf)
 		if err != nil {
