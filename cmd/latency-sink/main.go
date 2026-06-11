@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -44,6 +46,76 @@ type report struct {
 	MaxUs     float64 `json:"max_us"`
 	MinUs     float64 `json:"min_us"`
 	Note      string  `json:"note"`
+}
+
+// probeState keeps a rolling window of latency samples for probe mode.
+type probeState struct {
+	mu     sync.Mutex
+	window time.Duration
+	ts     []int64 // arrival ns
+	lat    []int64 // one-way ns
+	total  uint64
+}
+
+func newProbeState(w time.Duration) *probeState { return &probeState{window: w} }
+
+func (p *probeState) record(nowNs, latNs int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.total++
+	p.ts = append(p.ts, nowNs)
+	p.lat = append(p.lat, latNs)
+	cut := nowNs - p.window.Nanoseconds()
+	i := 0
+	for i < len(p.ts) && p.ts[i] < cut {
+		i++
+	}
+	p.ts = p.ts[i:]
+	p.lat = p.lat[i:]
+}
+
+// snapshot returns sorted window latencies and the all-time count.
+func (p *probeState) snapshot() ([]int64, uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]int64, len(p.lat))
+	copy(out, p.lat)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, p.total
+}
+
+// serveMetrics exposes Prometheus text-format gauges: rolling-window p50/p95/
+// p99/max one-way latency (seconds) + counters. Hand-rolled to keep the probe
+// dependency-free.
+func serveMetrics(addr string, p *probeState) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		v, total := p.snapshot()
+		pc := func(q float64) float64 {
+			if len(v) == 0 {
+				return 0
+			}
+			i := int(q * float64(len(v)))
+			if i >= len(v) {
+				i = len(v) - 1
+			}
+			return float64(v[i]) / 1e9
+		}
+		var maxS float64
+		if len(v) > 0 {
+			maxS = float64(v[len(v)-1]) / 1e9
+		}
+		fmt.Fprintf(w, "# TYPE bsl_probe_latency_seconds gauge\n")
+		for q, val := range map[string]float64{"0.5": pc(0.5), "0.95": pc(0.95), "0.99": pc(0.99)} {
+			fmt.Fprintf(w, "bsl_probe_latency_seconds{quantile=%q} %g\n", q, val)
+		}
+		fmt.Fprintf(w, "# TYPE bsl_probe_latency_max_seconds gauge\nbsl_probe_latency_max_seconds %g\n", maxS)
+		fmt.Fprintf(w, "# TYPE bsl_probe_window_samples gauge\nbsl_probe_window_samples %d\n", len(v))
+		fmt.Fprintf(w, "# TYPE bsl_probe_stamped_total counter\nbsl_probe_stamped_total %d\n", total)
+	})
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("metrics server: %v", err)
+	}
 }
 
 // groupSourceReq packs a Linux struct group_source_req by hand (this x/sys
@@ -71,8 +143,11 @@ func main() {
 	port := flag.Int("port", 9001, "UDP port to listen on (proxy EGRESS_PORT)")
 	groupsFlag := flag.String("groups", "", "comma-separated multicast groups to join")
 	source := flag.String("source", "", "SSM source address (empty = ASM join)")
-	duration := flag.Duration("duration", 70*time.Second, "receive window")
+	duration := flag.Duration("duration", 70*time.Second, "receive window (0 = run forever; probe mode)")
 	jsonOut := flag.String("json", "", "write JSON report to this path")
+	metricsAddr := flag.String("metrics-addr", "",
+		"expose Prometheus metrics on this addr (e.g. :9300) — probe mode: rolling-window percentiles")
+	window := flag.Duration("window", 60*time.Second, "rolling window for probe-mode percentiles")
 	flag.Parse()
 
 	ifi, err := net.InterfaceByName(*iface)
@@ -127,16 +202,25 @@ func main() {
 		}
 	}
 
+	// Probe mode: serve rolling-window percentiles as Prometheus text.
+	var probe *probeState
+	if *metricsAddr != "" {
+		probe = newProbeState(*window)
+		go serveMetrics(*metricsAddr, probe)
+		log.Printf("probe metrics on %s (window %s)", *metricsAddr, *window)
+	}
+
 	// Receive until the window closes.
 	tv := unix.Timeval{Sec: 1}
 	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
 	buf := make([]byte, 65536)
+	forever := *duration == 0
 	deadline := time.Now().Add(*duration)
 	rep := report{Note: "one-way; requires disciplined clocks (chrony/NTP) or same host"}
 	seen := make(map[uint32]struct{})
 	var lats []int64
 
-	for time.Now().Before(deadline) {
+	for forever || time.Now().Before(deadline) {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
 			continue // timeout tick or transient
@@ -162,6 +246,9 @@ func main() {
 		}
 		seen[seq] = struct{}{}
 		lats = append(lats, now-txNs)
+		if probe != nil {
+			probe.record(now, now-txNs)
+		}
 	}
 
 	rep.Unique = len(seen)
