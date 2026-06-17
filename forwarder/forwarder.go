@@ -146,6 +146,7 @@ type Forwarder struct {
 	fragDataSize int    // >0 = fragmentation enabled; fragment capacity per datagram
 	bindSource   net.IP // optional; when non-nil egress sockets are syscall.Bind'd to this IPv6 so SSM receivers can pre-declare it
 	hopLimit     int    // IPV6_MULTICAST_HOPS for egress; 0 = leave kernel default (1)
+	egressLoop   bool   // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast enters the kernel MFC and is forwarded to tunnel/consumer OIFs
 
 	// groupAddrs caches the multicast destination address by group index. The
 	// address is a pure function of (mcPrefix, mcGroupID, idx, egressPort) —
@@ -214,6 +215,17 @@ func (fw *Forwarder) SetBindSource(ip net.IP) {
 // default. Must be called before [OpenTargets].
 func (fw *Forwarder) SetEgressHopLimit(n int) {
 	fw.hopLimit = n
+}
+
+// SetEgressLoop enables IPV6_MULTICAST_LOOP on every egress socket. Off by
+// default. On a COLLAPSED or MESH node (the proxy shares a host with a multicast
+// router, mc_forwarding=1, emitting onto a dummy/tunnel iface), the kernel only
+// submits locally-originated multicast to the MFC when loopback is on; without
+// it the frames leave the emit iface but are never forwarded to the fabric/
+// consumer OIFs. Independent of -debug (which also adds per-packet logging).
+// Must be called before [OpenTargets].
+func (fw *Forwarder) SetEgressLoop(on bool) {
+	fw.egressLoop = on
 }
 
 // SetTxidDedup attaches a TxID claim store used to suppress ingress
@@ -297,7 +309,7 @@ func (fw *Forwarder) addrFor(idx uint32) *net.UDPAddr {
 // On error, all partially opened sockets are closed before returning.
 func (fw *Forwarder) OpenTargets(ifaces []*net.Interface, probeWorker bool) ([]Target, error) {
 	loopback := 0
-	if fw.debug {
+	if fw.debug || fw.egressLoop {
 		loopback = 1
 	}
 	targets := make([]Target, 0, len(ifaces))

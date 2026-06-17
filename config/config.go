@@ -67,6 +67,7 @@ type Config struct {
 	EgressIfaces   []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
 	EgressPort     int      // Destination UDP port written into outgoing multicast datagrams
 	EgressHopLimit int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
+	EgressLoop     bool     // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast is MFC-forwarded to tunnel/consumer OIFs
 
 	// Sharding
 	ShardBits  uint   // Number of txid prefix bits used as the group key (1–15)
@@ -173,6 +174,8 @@ func Load() (*Config, error) {
 		"destination UDP port written into outgoing multicast datagrams")
 	flag.IntVar(&c.EgressHopLimit, "egress-hoplimit", envInt("EGRESS_HOPLIMIT", 1),
 		"IPv6 multicast hop limit for egress (IPV6_MULTICAST_HOPS); raise above 1 for routed/tunneled mesh fabrics")
+	flag.BoolVar(&c.EgressLoop, "egress-loop", envBool("EGRESS_MULTICAST_LOOP", false),
+		"enable IPV6_MULTICAST_LOOP on egress; required on collapsed/mesh router nodes so locally-originated multicast is forwarded by the kernel MFC to tunnel/consumer OIFs")
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.StringVar(&c.MCScope, "scope", envStr("MC_SCOPE", "site"),
