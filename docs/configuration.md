@@ -8,7 +8,7 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | Flag | Env var | Default | Description |  |  |  |
 |--------------------|-------------------|--------------------|----------------------------------------------------------------------------------------------------|----------|---------|----------|
 | `-listen` | `LISTEN_ADDR` | `[::]` | Ingress bind address (without port) |  |  |  |
-| `-udp-listen-port` | `UDP_LISTEN_PORT` | `9000` | UDP listen port for incoming BSV transaction frames (BRC-12, BRC-124, or BRC-128) |  |  |  |
+| `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP listen port for incoming BSV transaction frames (BRC-12, BRC-124, or BRC-128) |  |  |  |
 | `-tcp-listen-port` | `TCP_LISTEN_PORT` | `0` | TCP ingress port for reliable delivery (0 = disabled) |  |  |  |
 | `-iface` | `MULTICAST_IF` | `eth0` | Comma-separated NIC names for multicast egress |  |  |  |
 | `-egress-port` | `EGRESS_PORT` | `9001` | Destination UDP port for multicast groups |  |  |  |
@@ -53,7 +53,7 @@ functionally identical but does not gain the syscall-amortisation speed-up.
 This is the high-throughput path.
 
 ```
--udp-listen-port 9000   # (default)
+-udp-listen-port 8725   # (default)
 ```
 
 ### TCP ingress (optional)
@@ -74,7 +74,7 @@ Both transports can run at the same time:
 ```
 shard-proxy \
   -iface eth0 \
-  -udp-listen-port 9000 \
+  -udp-listen-port 8725 \
   -tcp-listen-port 9100
 ```
 
@@ -172,7 +172,7 @@ shard-proxy -iface eth0
 shard-proxy \
   -iface eth0,eth1 \
   -shard-bits 8 \
-  -udp-listen-port 9000 \
+  -udp-listen-port 8725 \
   -egress-port 9001 \
   -otlp-endpoint collector:4317
 ```
@@ -182,7 +182,7 @@ shard-proxy \
 ```bash
 shard-proxy \
   -iface eth0 \
-  -udp-listen-port 9000 \
+  -udp-listen-port 8725 \
   -tcp-listen-port 9100
 ```
 
@@ -191,7 +191,7 @@ shard-proxy \
 ```bash
 shard-proxy \
   -iface eth0 \
-  -udp-listen-port 9000 \
+  -udp-listen-port 8725 \
   -drain-timeout 15s
 ```
 
@@ -224,7 +224,7 @@ with no copying and no extra goroutines on the hot path:
   -iface       eth0,eth1 \
   -shard-bits  8         \
   -scope       site      \
-  -udp-listen-port 9000  \
+  -udp-listen-port 8725  \
   -egress-port 9001
 ```
 

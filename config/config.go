@@ -7,7 +7,7 @@
 //
 //	Flag             Env var          Default       Description
 //	-listen               LISTEN_ADDR           [::]      Ingress bind address
-//	-udp-listen-port      UDP_LISTEN_PORT       9000      UDP listen port
+//	-udp-listen-port      UDP_LISTEN_PORT       8725      UDP listen port
 //	-tcp-listen-port      TCP_LISTEN_PORT       0         TCP ingress port (0 = disabled)
 //	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
 //	-egress-port          EGRESS_PORT           9001      Destination port on groups
@@ -164,7 +164,7 @@ func Load() (*Config, error) {
 
 	flag.StringVar(&c.ListenAddr, "listen", envStr("LISTEN_ADDR", "[::]"),
 		"ingress bind address (without port)")
-	flag.IntVar(&c.UDPListenPort, "udp-listen-port", envInt("UDP_LISTEN_PORT", 9000),
+	flag.IntVar(&c.UDPListenPort, "udp-listen-port", envInt("UDP_LISTEN_PORT", 8725),
 		"UDP listen port for incoming BSV BRC-124/BRC-128 transaction frames")
 	flag.IntVar(&c.TCPListenPort, "tcp-listen-port", envInt("TCP_LISTEN_PORT", 0),
 		"TCP ingress port for reliable frame delivery (0 = disabled)")

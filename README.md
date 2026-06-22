@@ -58,7 +58,7 @@ make clean      # removes built binaries
   -iface            eth0 \
   -shard-bits       16   \
   -scope            site \
-  -udp-listen-port  9000 \
+  -udp-listen-port  8725 \
   -egress-port      9001
 ```
 
@@ -67,7 +67,7 @@ With TCP ingress enabled:
 ```bash
 ./shard-proxy \
   -iface            eth0 \
-  -udp-listen-port  9000 \
+  -udp-listen-port  8725 \
   -tcp-listen-port  9100
 ```
 

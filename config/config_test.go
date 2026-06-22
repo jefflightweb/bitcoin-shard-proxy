@@ -51,8 +51,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.UDPListenPort != 9000 {
-		t.Errorf("UDPListenPort = %d, want 9000", cfg.UDPListenPort)
+	if cfg.UDPListenPort != 8725 {
+		t.Errorf("UDPListenPort = %d, want 8725", cfg.UDPListenPort)
 	}
 	if cfg.EgressPort != 9001 {
 		t.Errorf("EgressPort = %d, want 9001", cfg.EgressPort)

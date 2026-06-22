@@ -33,7 +33,7 @@ import (
 const ipv6UDPOverhead = 40 + 8 + 104 // IPv6 + UDP + BRC-130 header
 
 func main() {
-	addr := flag.String("addr", "[::1]:9000", "proxy listen address (host:port)")
+	addr := flag.String("addr", "[::1]:8725", "proxy listen address (host:port)")
 	count := flag.Int("count", 16, "number of frames to send (0 = infinite)")
 	intervalMs := flag.Int("interval", 200, "milliseconds between frames")
 	shardBits := flag.Uint("shard-bits", 2, "shard-bits the proxy is configured with (for predicted group display)")
