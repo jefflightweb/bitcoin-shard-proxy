@@ -105,13 +105,13 @@ func serveMetrics(addr string, p *probeState) {
 		if len(v) > 0 {
 			maxS = float64(v[len(v)-1]) / 1e9
 		}
-		fmt.Fprintf(w, "# TYPE bsl_probe_latency_seconds gauge\n")
+		_, _ = fmt.Fprintf(w, "# TYPE bsl_probe_latency_seconds gauge\n")
 		for q, val := range map[string]float64{"0.5": pc(0.5), "0.95": pc(0.95), "0.99": pc(0.99)} {
-			fmt.Fprintf(w, "bsl_probe_latency_seconds{quantile=%q} %g\n", q, val)
+			_, _ = fmt.Fprintf(w, "bsl_probe_latency_seconds{quantile=%q} %g\n", q, val)
 		}
-		fmt.Fprintf(w, "# TYPE bsl_probe_latency_max_seconds gauge\nbsl_probe_latency_max_seconds %g\n", maxS)
-		fmt.Fprintf(w, "# TYPE bsl_probe_window_samples gauge\nbsl_probe_window_samples %d\n", len(v))
-		fmt.Fprintf(w, "# TYPE bsl_probe_stamped_total counter\nbsl_probe_stamped_total %d\n", total)
+		_, _ = fmt.Fprintf(w, "# TYPE bsl_probe_latency_max_seconds gauge\nbsl_probe_latency_max_seconds %g\n", maxS)
+		_, _ = fmt.Fprintf(w, "# TYPE bsl_probe_window_samples gauge\nbsl_probe_window_samples %d\n", len(v))
+		_, _ = fmt.Fprintf(w, "# TYPE bsl_probe_stamped_total counter\nbsl_probe_stamped_total %d\n", total)
 	})
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Printf("metrics server: %v", err)
