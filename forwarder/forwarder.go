@@ -431,22 +431,39 @@ func (fw *Forwarder) Dispatch(egr *Egress, raw []byte, src net.Addr, workerID in
 // until egr.Flush returns.
 func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, workerID int, class IngressClass) {
 	n := len(raw)
+	privileged := class == IngressPrivileged
 	switch {
 	case n > 6 && raw[6] == frame.FrameVerV4:
-		if class != IngressPrivileged {
+		if !privileged {
 			fw.rejectPrivileged(raw, workerID)
 			return
+		}
+		fc := metrics.IngressClassBlock
+		if n > 7 && raw[7] == frame.BlockMsgCoinbase {
+			fc = metrics.IngressClassCoinbase
+		}
+		if fw.rec != nil {
+			fw.rec.IngressMetered(fc, privileged, n)
 		}
 		fw.ProcessBlock(egr, raw, src, workerID)
 	case n > 6 && raw[6] == frame.FrameVerV5:
-		if class != IngressPrivileged {
+		if !privileged {
 			fw.rejectPrivileged(raw, workerID)
 			return
 		}
+		if fw.rec != nil {
+			fw.rec.IngressMetered(metrics.IngressClassSubtree, privileged, n)
+		}
 		fw.ProcessSubtreeData(egr, raw, src, workerID)
 	case n > 6 && raw[6] == frame.FrameVerV6:
+		if fw.rec != nil {
+			fw.rec.IngressMetered(metrics.IngressClassAnchor, privileged, n)
+		}
 		fw.ProcessAnchor(egr, raw, src, workerID)
 	default:
+		if fw.rec != nil {
+			fw.rec.IngressMetered(metrics.IngressClassTx, privileged, n)
+		}
 		fw.Process(egr, raw, src, workerID)
 	}
 }

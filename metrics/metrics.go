@@ -140,6 +140,16 @@ type Recorder struct {
 	promTxEgressErrs  *promclient.CounterVec
 	promTxIngressErrs *promclient.CounterVec
 
+	// Accepted-ingress volume by frame class and admission tier — labels:
+	// class, tier. Tracked (not billed) so the future ingress billing model has
+	// data without re-instrumenting; miners emit block/coinbase/subtree, tx
+	// senders emit tx. Handles are pre-resolved (small fixed label set) so the
+	// admission hot path does one array index, no per-frame label lookup.
+	promIngressBytes   *promclient.CounterVec
+	promIngressPackets *promclient.CounterVec
+	ingressBytesH      [ingressClassCount][2]promclient.Counter
+	ingressPacketsH    [ingressClassCount][2]promclient.Counter
+
 	// Per-flow / per-group — exposed as labels: iface, group. Backed by a
 	// per-worker-sharded counter store summed at scrape by flowCollector, so the
 	// hot-path increment is single-writer (no cross-core contention).
@@ -325,6 +335,20 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsp_ingress_errors_total",
 		Help: "ReadFrom non-fatal errors on ingress socket",
 	}, []string{"worker", "network_interface_name"})
+	r.promIngressBytes = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_ingress_class_bytes_total",
+		Help: "Accepted ingress bytes by frame class and admission tier (tracked, not billed)",
+	}, []string{"class", "tier"})
+	r.promIngressPackets = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsp_ingress_class_packets_total",
+		Help: "Accepted ingress frames by frame class and admission tier (tracked, not billed)",
+	}, []string{"class", "tier"})
+	for c := IngressFrameClass(0); c < ingressClassCount; c++ {
+		for ti, tier := range []string{"privileged", "transaction"} {
+			r.ingressBytesH[c][ti] = r.promIngressBytes.WithLabelValues(c.String(), tier)
+			r.ingressPacketsH[c][ti] = r.promIngressPackets.WithLabelValues(c.String(), tier)
+		}
+	}
 	r.flowPacketsDesc = promclient.NewDesc("bsp_flow_packets_total",
 		"Packets per shard group per interface (active groups only)",
 		[]string{"network_interface_name", "group"}, nil)
@@ -335,6 +359,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		r.promRxPackets, r.promRxBytes, r.promRxDrops, r.promRxSize,
 		r.promTxPackets, r.promTxBytes,
 		r.promTxEgressErrs, r.promTxIngressErrs,
+		r.promIngressBytes, r.promIngressPackets,
 		&flowCollector{r: r},
 	} {
 		if err := reg.Register(c); err != nil {
@@ -510,6 +535,50 @@ func (r *Recorder) IngressDeduped(iface string, workerID int, frameType string) 
 		ifaceAttr(iface),
 		attribute.String("frame_type", frameType),
 	))
+}
+
+// IngressFrameClass identifies the BRC frame class of an accepted ingress frame,
+// for the per-class admission volume counters. Values index a fixed handle array.
+type IngressFrameClass uint8
+
+const (
+	IngressClassTx       IngressFrameClass = iota // BRC-12/124/128 transactions
+	IngressClassBlock                             // BRC-131 block announce
+	IngressClassCoinbase                          // BRC-133 coinbase
+	IngressClassSubtree                           // BRC-132 subtree data
+	IngressClassAnchor                            // BRC-134 chained anchor
+	ingressClassCount
+)
+
+func (c IngressFrameClass) String() string {
+	switch c {
+	case IngressClassBlock:
+		return "block"
+	case IngressClassCoinbase:
+		return "coinbase"
+	case IngressClassSubtree:
+		return "subtree"
+	case IngressClassAnchor:
+		return "anchor"
+	default:
+		return "tx"
+	}
+}
+
+// IngressMetered records one accepted ingress frame of size bytes under its
+// frame class and admission tier (privileged miner socket vs transaction-only).
+// Hot path: one array index + counter add, no label lookup. Rejected frames are
+// not metered here (they are counted via PrivilegedFrameRejected/BlockPoWRejected).
+func (r *Recorder) IngressMetered(class IngressFrameClass, privileged bool, size int) {
+	if class >= ingressClassCount {
+		return
+	}
+	ti := 1 // transaction
+	if privileged {
+		ti = 0
+	}
+	r.ingressBytesH[class][ti].Add(float64(size))
+	r.ingressPacketsH[class][ti].Inc()
 }
 
 // PrivilegedFrameRejected records a privileged control-plane frame dropped

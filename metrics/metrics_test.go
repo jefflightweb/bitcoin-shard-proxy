@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // newTestRecorder creates a Recorder with no OTLP endpoint, suitable for
@@ -79,6 +81,33 @@ func TestPacketForwarded(t *testing.T) {
 func TestIngressError(t *testing.T) {
 	rec := newTestRecorder(t, 1)
 	rec.IngressError("eth0", 0)
+}
+
+func TestIngressMetered(t *testing.T) {
+	rec := newTestRecorder(t, 1)
+	rec.IngressMetered(IngressClassTx, false, 100)      // transaction socket
+	rec.IngressMetered(IngressClassTx, false, 50)       // same class+tier
+	rec.IngressMetered(IngressClassBlock, true, 250)    // privileged socket
+	rec.IngressMetered(IngressClassCoinbase, true, 80)  // privileged socket
+	rec.IngressMetered(ingressClassCount, true, 999999) // out of range → no-op, no panic
+
+	const txT, privT = 1, 0
+	if got := testutil.ToFloat64(rec.ingressBytesH[IngressClassTx][txT]); got != 150 {
+		t.Errorf("tx/transaction bytes = %v, want 150", got)
+	}
+	if got := testutil.ToFloat64(rec.ingressPacketsH[IngressClassTx][txT]); got != 2 {
+		t.Errorf("tx/transaction packets = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(rec.ingressBytesH[IngressClassBlock][privT]); got != 250 {
+		t.Errorf("block/privileged bytes = %v, want 250", got)
+	}
+	if got := testutil.ToFloat64(rec.ingressPacketsH[IngressClassCoinbase][privT]); got != 1 {
+		t.Errorf("coinbase/privileged packets = %v, want 1", got)
+	}
+	// The out-of-range call must not have leaked into any bucket.
+	if got := testutil.ToFloat64(rec.ingressBytesH[IngressClassTx][privT]); got != 0 {
+		t.Errorf("tx/privileged bytes = %v, want 0 (untouched)", got)
+	}
 }
 
 func TestEgressError(t *testing.T) {
