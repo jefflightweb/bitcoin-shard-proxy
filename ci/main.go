@@ -183,8 +183,11 @@ func (p *pipeline) lint(ctx context.Context) error {
 }
 
 func (p *pipeline) vuln(ctx context.Context) error {
+	// Pinned: govulncheck@latest (>=v1.2, via x/tools v0.46.0) panics on Go 1.26
+	// with "ForEachElement called on type containing *types.TypeParam" — a tooling
+	// crash in its SSA analysis, not a vuln. v1.1.4 scans this module cleanly.
 	_, err := p.goBase().
-		WithExec([]string{"go", "install", "golang.org/x/vuln/cmd/govulncheck@latest"}).
+		WithExec([]string{"go", "install", "golang.org/x/vuln/cmd/govulncheck@v1.1.4"}).
 		WithExec([]string{"sh", "-c", "/go/bin/govulncheck ./..."}).
 		Sync(ctx)
 	return err
