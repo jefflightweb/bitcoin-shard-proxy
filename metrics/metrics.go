@@ -166,6 +166,8 @@ type Recorder struct {
 	// when dedup is on, so they are direct prometheus.Counter handles
 	// keyed by prefix (one allocation per distinct prefix at startup).
 	ingressDeduped        metric.Int64Counter // by worker, iface, frame_type (cold)
+	privilegedRejected    metric.Int64Counter // by frame_type (cold; miner-tier gate)
+	blockPoWRejected      metric.Int64Counter // block announces failing the PoW gate (cold)
 	promTxidClaimLocalHit *promclient.CounterVec
 	promTxidClaimWon      *promclient.CounterVec
 	promTxidClaimLost     *promclient.CounterVec
@@ -413,6 +415,14 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("Frames suppressed by the ingress TxID dedup gate (sibling proxy or listener already claimed the TxID)")); err != nil {
 		return nil, err
 	}
+	if r.privilegedRejected, err = meter.Int64Counter("bsp_privileged_frame_rejected_total",
+		metric.WithDescription("Privileged control-plane frames (block announce, coinbase, subtree data) dropped on a transaction-only ingress socket (miner-tier gate)")); err != nil {
+		return nil, err
+	}
+	if r.blockPoWRejected, err = meter.Int64Counter("bsp_block_pow_rejected_total",
+		metric.WithDescription("BRC-131 block announces dropped by the proof-of-work gate (invalid header PoW or below the difficulty floor)")); err != nil {
+		return nil, err
+	}
 	// TxidClaim* are per-packet when ingress dedup is on; direct prometheus
 	// counters to skip the ~10% CPU spent in OTel int64Counter.Add.
 	r.promTxidClaimLocalHit = promclient.NewCounterVec(promclient.CounterOpts{
@@ -500,6 +510,22 @@ func (r *Recorder) IngressDeduped(iface string, workerID int, frameType string) 
 		ifaceAttr(iface),
 		attribute.String("frame_type", frameType),
 	))
+}
+
+// PrivilegedFrameRejected records a privileged control-plane frame dropped
+// because it arrived on a transaction-only ingress socket. frameType is one
+// of "brc131", "brc133", "brc132" — block announce, coinbase, subtree data.
+// Only miner-tier ingress sockets accept these frame classes.
+func (r *Recorder) PrivilegedFrameRejected(frameType string) {
+	r.privilegedRejected.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("frame_type", frameType),
+	))
+}
+
+// BlockPoWRejected records a BRC-131 block announce dropped by the proof-of-work
+// gate — its header failed PoW or claimed a difficulty below the configured floor.
+func (r *Recorder) BlockPoWRejected() {
+	r.blockPoWRejected.Add(context.Background(), 1)
 }
 
 // TxidClaimLocalHit records a tier-1 local-LRU short-circuit during TxID

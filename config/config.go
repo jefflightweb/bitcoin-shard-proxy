@@ -9,6 +9,11 @@
 //	-listen               LISTEN_ADDR           [::]      Ingress bind address
 //	-udp-listen-port      UDP_LISTEN_PORT       8725      UDP listen port
 //	-tcp-listen-port      TCP_LISTEN_PORT       0         TCP ingress port (0 = disabled)
+//	-miner-listen-port    MINER_LISTEN_PORT     0         UDP miner ingress for privileged frames (0 = disabled)
+//	-miner-tcp-listen-port MINER_TCP_LISTEN_PORT 0        TCP miner ingress for privileged frames (0 = disabled)
+//	-tx-accept-privileged TX_ACCEPT_PRIVILEGED  false     User ingress also accepts privileged frames (legacy)
+//	-require-block-pow    REQUIRE_BLOCK_POW     false     Gate BRC-131 block announces on header proof-of-work
+//	-min-pow-bits         MIN_POW_BITS          0         PoW difficulty floor (compact nBits; 0 = self-consistency only)
 //	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
 //	-egress-port          EGRESS_PORT           9001      Destination port on groups
 //	-egress-hoplimit      EGRESS_HOPLIMIT       1         IPV6_MULTICAST_HOPS (raise for routed/tunneled mesh)
@@ -61,13 +66,34 @@ var Scopes = map[string]uint16{
 // after [Load] returns; treat the value as immutable.
 type Config struct {
 	// Network
-	ListenAddr     string   // e.g. "[::]"
-	UDPListenPort  int      // UDP port to receive BSV BRC-124/BRC-128 transaction frames
-	TCPListenPort  int      // TCP ingress port; 0 = disabled
-	EgressIfaces   []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
-	EgressPort     int      // Destination UDP port written into outgoing multicast datagrams
-	EgressHopLimit int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
-	EgressLoop     bool     // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast is MFC-forwarded to tunnel/consumer OIFs
+	ListenAddr    string // e.g. "[::]"
+	UDPListenPort int    // UDP port to receive BSV BRC-124/BRC-128 transaction frames
+	TCPListenPort int    // TCP ingress port; 0 = disabled
+
+	// Miner-tier ingress gate.
+	//
+	// The user/consumer ingress (UDPListenPort / TCPListenPort, default
+	// 8725) is transaction-only unless TxAcceptPrivileged is set: BRC-131
+	// block announce, BRC-133 coinbase, and BRC-132 subtree data frames are
+	// dropped there. Those privileged control-plane frames may only enter
+	// through the miner ingress sockets below, which an operator exposes to
+	// miner-tier peers alone (over their tunnels / via firewall). A proxy
+	// that should not accept block/coinbase/subtree data simply leaves both
+	// miner ports at 0.
+	MinerUDPListenPort int      // UDP miner ingress port (privileged frames); 0 = disabled
+	MinerTCPListenPort int      // TCP miner ingress port (privileged frames); 0 = disabled
+	TxAcceptPrivileged bool     // when true the user ingress also accepts privileged frames (legacy single-port behaviour)
+	EgressIfaces       []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
+	EgressPort         int      // Destination UDP port written into outgoing multicast datagrams
+	EgressHopLimit     int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
+	EgressLoop         bool     // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast is MFC-forwarded to tunnel/consumer OIFs
+
+	// Proof-of-work gate for BRC-131 block announces. Permissionless: validates
+	// the in-frame header carries real work rather than authorizing the emitter.
+	// RequireBlockPoW is off by default. MinPoWBits is the difficulty floor in
+	// Bitcoin compact (nBits) form; 0 = header self-consistency only (weak).
+	RequireBlockPoW bool
+	MinPoWBits      uint32
 
 	// Sharding
 	ShardBits  uint   // Number of txid prefix bits used as the group key (1–15)
@@ -168,6 +194,16 @@ func Load() (*Config, error) {
 		"UDP listen port for incoming BSV BRC-124/BRC-128 transaction frames")
 	flag.IntVar(&c.TCPListenPort, "tcp-listen-port", envInt("TCP_LISTEN_PORT", 0),
 		"TCP ingress port for reliable frame delivery (0 = disabled)")
+	flag.IntVar(&c.MinerUDPListenPort, "miner-listen-port", envInt("MINER_LISTEN_PORT", 0),
+		"UDP miner ingress port accepting privileged BRC-131/133/132 frames; expose only to miner-tier peers (0 = disabled)")
+	flag.IntVar(&c.MinerTCPListenPort, "miner-tcp-listen-port", envInt("MINER_TCP_LISTEN_PORT", 0),
+		"TCP miner ingress port accepting privileged BRC-131/133/132 frames (0 = disabled)")
+	flag.BoolVar(&c.TxAcceptPrivileged, "tx-accept-privileged", envBool("TX_ACCEPT_PRIVILEGED", false),
+		"allow the user transaction ingress to also accept privileged block/coinbase/subtree-data frames (legacy single-port behaviour; default false = transaction-only)")
+	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
+		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
+	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
+		"difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
 	ifaceFlag := flag.String("iface", envStr("MULTICAST_IF", "eth0"),
 		"comma-separated NIC names for multicast egress (e.g. eth0,eth1)")
 	flag.IntVar(&c.EgressPort, "egress-port", envInt("EGRESS_PORT", 9001),
@@ -264,6 +300,28 @@ func Load() (*Config, error) {
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits
 	c.OTLPInterval = *otlpInterval
+
+	// Miner ingress ports must not collide with the user ingress ports on the
+	// same transport — they carry a different (privileged) frame class.
+	if c.MinerUDPListenPort != 0 && c.MinerUDPListenPort == c.UDPListenPort {
+		return nil, fmt.Errorf("miner-listen-port (%d) must differ from udp-listen-port", c.MinerUDPListenPort)
+	}
+	if c.MinerTCPListenPort != 0 && c.TCPListenPort != 0 && c.MinerTCPListenPort == c.TCPListenPort {
+		return nil, fmt.Errorf("miner-tcp-listen-port (%d) must differ from tcp-listen-port", c.MinerTCPListenPort)
+	}
+
+	// Parse the PoW difficulty floor (Bitcoin compact nBits): hex (0x… / bare) or decimal.
+	bitsStr := strings.TrimSpace(*minPoWBits)
+	base := 10
+	if low := strings.ToLower(bitsStr); strings.HasPrefix(low, "0x") {
+		bitsStr = bitsStr[2:]
+		base = 16
+	}
+	v, perr := strconv.ParseUint(bitsStr, base, 32)
+	if perr != nil {
+		return nil, fmt.Errorf("invalid -min-pow-bits %q: %w", *minPoWBits, perr)
+	}
+	c.MinPoWBits = uint32(v)
 
 	// Resolve multicast scope + source-mode → upper-16-bit prefix.
 	//

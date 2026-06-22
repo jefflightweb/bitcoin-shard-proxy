@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"math/big"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/pow"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
 	"github.com/lightwebinc/shard-proxy/metrics"
@@ -148,6 +150,14 @@ type Forwarder struct {
 	hopLimit     int    // IPV6_MULTICAST_HOPS for egress; 0 = leave kernel default (1)
 	egressLoop   bool   // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast enters the kernel MFC and is forwarded to tunnel/consumer OIFs
 
+	// requireBlockPoW gates BRC-131 block-announce frames on a cheap stateless
+	// proof-of-work check (the permissionless complement to admission control):
+	// the in-frame 80-byte header must hash under the target its nBits claims,
+	// and that target must be ≤ powFloor. nil powFloor = self-consistency only.
+	// Off by default; coinbase/subtree carry no in-frame PoW and are unaffected.
+	requireBlockPoW bool
+	powFloor        *big.Int
+
 	// groupAddrs caches the multicast destination address by group index. The
 	// address is a pure function of (mcPrefix, mcGroupID, idx, egressPort) —
 	// invariant across resharding/bridging, which change the index a txid maps
@@ -226,6 +236,25 @@ func (fw *Forwarder) SetEgressHopLimit(n int) {
 // Must be called before [OpenTargets].
 func (fw *Forwarder) SetEgressLoop(on bool) {
 	fw.egressLoop = on
+}
+
+// SetBlockPoW enables the cheap stateless proof-of-work gate for BRC-131
+// block-announce frames. When require is true, a block announce is forwarded
+// only if its in-frame 80-byte header hashes under the target its nBits
+// claims and that target is at least as hard as floorBits (the difficulty
+// floor, in Bitcoin compact form). floorBits 0 disables the floor (header
+// self-consistency only — weak, since a forger can claim trivial difficulty;
+// set a real floor in production). This validates the artifact, not the
+// emitter, so it stays permissionless. Coinbase (BRC-133) and subtree data
+// (BRC-132) carry no in-frame PoW and are unaffected. Must be called before
+// any worker starts.
+func (fw *Forwarder) SetBlockPoW(require bool, floorBits uint32) {
+	fw.requireBlockPoW = require
+	if require && floorBits != 0 {
+		fw.powFloor = pow.CompactToTarget(floorBits)
+	} else {
+		fw.powFloor = nil
+	}
 }
 
 // SetTxidDedup attaches a TxID claim store used to suppress ingress
@@ -359,24 +388,86 @@ func (fw *Forwarder) SetFragMTU(mtu int) {
 	}
 }
 
+// IngressClass classifies the frame set an ingress socket is permitted to
+// accept. It is a per-socket property (not a forwarder-wide one) so a single
+// proxy can bind a transaction-only socket for consumers alongside a
+// privileged socket exposed only to miner-tier peers over their tunnels.
+type IngressClass uint8
+
+const (
+	// IngressPrivileged accepts every frame class, including the
+	// miner-only control-plane frames: BRC-131 block announce, BRC-133
+	// coinbase, and BRC-132 subtree data. Bind this only on sockets
+	// reachable solely by miner-tier peers.
+	IngressPrivileged IngressClass = iota
+
+	// IngressTransaction accepts only transaction-bearing frames
+	// (BRC-12/124/128 and BRC-134 anchor). BRC-131 block / BRC-133
+	// coinbase (FrameVerV4) and BRC-132 subtree data (FrameVerV5) are
+	// dropped and counted. This is the class for the public user/consumer
+	// ingress port.
+	IngressTransaction
+)
+
 // Dispatch routes one ingress datagram to the correct Process* entry point by
-// its BRC frame-version byte (raw[6]). It is the single source of truth for
-// frame-version routing, shared by the worker receive loop and any alternative
-// ingress that drives the forwarder directly, so version handling cannot drift
-// between callers. raw is the UDP payload (the BRC frame); src is its source;
-// egr is the caller's per-worker egress queue. raw must remain valid until
-// egr.Flush returns.
+// its BRC frame-version byte (raw[6]). It accepts every frame class
+// (equivalent to IngressPrivileged) and is retained for callers that do not
+// enforce a miner-tier gate. New callers should use [Forwarder.DispatchClass].
 func (fw *Forwarder) Dispatch(egr *Egress, raw []byte, src net.Addr, workerID int) {
+	fw.DispatchClass(egr, raw, src, workerID, IngressPrivileged)
+}
+
+// DispatchClass routes one ingress datagram to the correct Process* entry
+// point by its BRC frame-version byte (raw[6]), gated by the socket's
+// [IngressClass]. It is the single source of truth for frame-version routing,
+// shared by the worker receive loop and any alternative ingress that drives
+// the forwarder directly, so version handling cannot drift between callers.
+//
+// On an IngressTransaction socket, BRC-131 block/BRC-133 coinbase (FrameVerV4)
+// and BRC-132 subtree data (FrameVerV5) are dropped (counted via
+// PrivilegedFrameRejected) — those frames may only enter through a privileged
+// (miner-tier) socket. raw is the UDP payload (the BRC frame); src is its
+// source; egr is the caller's per-worker egress queue. raw must remain valid
+// until egr.Flush returns.
+func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, workerID int, class IngressClass) {
 	n := len(raw)
 	switch {
 	case n > 6 && raw[6] == frame.FrameVerV4:
+		if class != IngressPrivileged {
+			fw.rejectPrivileged(raw, workerID)
+			return
+		}
 		fw.ProcessBlock(egr, raw, src, workerID)
 	case n > 6 && raw[6] == frame.FrameVerV5:
+		if class != IngressPrivileged {
+			fw.rejectPrivileged(raw, workerID)
+			return
+		}
 		fw.ProcessSubtreeData(egr, raw, src, workerID)
 	case n > 6 && raw[6] == frame.FrameVerV6:
 		fw.ProcessAnchor(egr, raw, src, workerID)
 	default:
 		fw.Process(egr, raw, src, workerID)
+	}
+}
+
+// rejectPrivileged drops a privileged control-plane frame received on a
+// transaction-only ingress socket and records it under the wire frame-type
+// label (brc131 announce / brc133 coinbase / brc132 subtree data).
+func (fw *Forwarder) rejectPrivileged(raw []byte, workerID int) {
+	frameType := "brc132" // FrameVerV5 subtree data
+	if len(raw) > 6 && raw[6] == frame.FrameVerV4 {
+		frameType = "brc131" // BlockMsgAnnounce
+		if len(raw) > 7 && raw[7] == frame.BlockMsgCoinbase {
+			frameType = "brc133"
+		}
+	}
+	if fw.rec != nil {
+		fw.rec.PrivilegedFrameRejected(frameType)
+	}
+	if fw.debug {
+		fw.log.Debug("privileged frame rejected on transaction-only ingress",
+			"frame_type", frameType, "worker", workerID)
 	}
 }
 
@@ -560,6 +651,24 @@ func (fw *Forwarder) ProcessBlock(egr *Egress, raw []byte, src net.Addr, workerI
 			fw.rec.PacketDropped(egr.targets[0].Iface.Name, workerID, "decode_error")
 		}
 		return
+	}
+
+	// Permissionless proof-of-work gate: a block announcement must carry valid
+	// work. Validates the artifact (the in-frame header), not the emitter, so
+	// no key/allowlist is consulted — anyone may announce, but a forged
+	// announcement costs work proportional to the difficulty floor. Applies
+	// only to BlockMsgAnnounce (coinbase carries no header).
+	if fw.requireBlockPoW && bf.MsgType == frame.BlockMsgAnnounce {
+		if len(bf.Payload) < pow.HeaderSize || !pow.CheckHeader(bf.Payload[:pow.HeaderSize], fw.powFloor) {
+			if fw.rec != nil {
+				fw.rec.BlockPoWRejected()
+			}
+			if fw.debug {
+				fw.log.Debug("block announce rejected: invalid proof of work",
+					"content_id", fmt.Sprintf("%x", bf.ContentID[:8]))
+			}
+			return
+		}
 	}
 
 	// Ingress TxID dedup gate. BRC-131 block frames carry a ContentID

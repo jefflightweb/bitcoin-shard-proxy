@@ -74,6 +74,7 @@ type Worker struct {
 	log          *slog.Logger
 	recvBatch    int
 	recvBufBytes int
+	class        forwarder.IngressClass
 }
 
 // New constructs a Worker. No sockets are opened until [Run] is called.
@@ -114,6 +115,15 @@ func (w *Worker) SetRecvBufBytes(n int) {
 		return
 	}
 	w.recvBufBytes = n
+}
+
+// SetIngressClass sets the frame-class gate for this worker's socket. The
+// zero value ([forwarder.IngressPrivileged]) accepts every frame class;
+// [forwarder.IngressTransaction] drops block/coinbase/subtree-data frames so
+// they can only enter through a miner-tier privileged socket. Call before
+// [Run].
+func (w *Worker) SetIngressClass(c forwarder.IngressClass) {
+	w.class = c
 }
 
 // Run opens the ingress socket, opens egress targets via the forwarder, then
@@ -262,7 +272,7 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 			if w.rec != nil && len(targets) > 0 {
 				w.rec.PacketReceived(ifaceName, w.id, n)
 			}
-			w.fwd.Dispatch(egr, buf[:n], src, w.id)
+			w.fwd.DispatchClass(egr, buf[:n], src, w.id, w.class)
 		}
 
 		egr.Flush()

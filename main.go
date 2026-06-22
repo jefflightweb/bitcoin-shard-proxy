@@ -50,6 +50,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -164,6 +165,9 @@ func main() {
 		"scope", cfg.MCScope,
 		"udp_listen_port", cfg.UDPListenPort,
 		"tcp_listen_port", cfg.TCPListenPort,
+		"miner_udp_listen_port", cfg.MinerUDPListenPort,
+		"miner_tcp_listen_port", cfg.MinerTCPListenPort,
+		"tx_accept_privileged", cfg.TxAcceptPrivileged,
 		"egress_port", cfg.EgressPort,
 		"ifaces", cfg.EgressIfaces,
 		"debug", cfg.Debug,
@@ -176,6 +180,10 @@ func main() {
 	fwd := forwarder.New(engine, cfg.MCPrefix, cfg.MCGroupID, cfg.EgressPort, cfg.Debug, rec)
 	fwd.SetEgressHopLimit(cfg.EgressHopLimit)
 	fwd.SetEgressLoop(cfg.EgressLoop)
+	if cfg.RequireBlockPoW {
+		fwd.SetBlockPoW(true, cfg.MinPoWBits)
+		slog.Info("block-announce proof-of-work gate enabled", "min_pow_bits", fmt.Sprintf("0x%08x", cfg.MinPoWBits))
+	}
 	if cfg.FragMTU > 0 {
 		fwd.SetFragMTU(cfg.FragMTU)
 		slog.Info("BRC-130 fragmentation enabled", "frag_mtu", cfg.FragMTU)
@@ -242,10 +250,18 @@ func main() {
 	// Start the metrics HTTP server (blocks on done; shuts down gracefully).
 	go rec.Serve(cfg.MetricsAddr, cfg.PprofEnabled, done)
 
+	// User/consumer ingress: transaction-only unless -tx-accept-privileged.
+	// Privileged block/coinbase/subtree-data frames are dropped here and may
+	// only enter through the miner ingress (below).
+	userClass := forwarder.IngressTransaction
+	if cfg.TxAcceptPrivileged {
+		userClass = forwarder.IngressPrivileged
+	}
 	for i := range cfg.NumWorkers {
 		w := worker.New(i, fwd, ifaces, rec)
 		w.SetRecvBatch(cfg.RecvBatch)
 		w.SetRecvBufBytes(cfg.RecvBufBytes)
+		w.SetIngressClass(userClass)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -253,6 +269,29 @@ func main() {
 				slog.Error("worker exited with error", "worker", i, "err", err)
 			}
 		}()
+	}
+
+	// Miner ingress (privileged): a separate UDP socket pool that accepts the
+	// miner-only control-plane frames (BRC-131 block, BRC-133 coinbase,
+	// BRC-132 subtree data). Operators expose this port to miner-tier peers
+	// only (over their tunnels / via firewall source restriction). Disabled
+	// when -miner-listen-port is 0.
+	if cfg.MinerUDPListenPort > 0 {
+		for i := range cfg.NumWorkers {
+			id := cfg.NumWorkers + i // distinct log ids from the user pool
+			w := worker.New(id, fwd, ifaces, rec)
+			w.SetRecvBatch(cfg.RecvBatch)
+			w.SetRecvBufBytes(cfg.RecvBufBytes)
+			w.SetIngressClass(forwarder.IngressPrivileged)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := w.Run(cfg.ListenAddr, cfg.MinerUDPListenPort, done); err != nil {
+					slog.Error("miner worker exited with error", "worker", id, "err", err)
+				}
+			}()
+		}
+		slog.Info("miner ingress enabled (privileged frames)", "udp_listen_port", cfg.MinerUDPListenPort)
 	}
 
 	// Start TCP ingress if configured. Mark it as a /readyz prerequisite
@@ -263,6 +302,7 @@ func main() {
 	if cfg.TCPListenPort > 0 {
 		rec.RequireTCPIngress()
 		tcpIngress := worker.NewTCPIngress(fwd, ifaces, rec)
+		tcpIngress.SetIngressClass(userClass)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -270,6 +310,21 @@ func main() {
 				slog.Error("TCP ingress exited with error", "err", err)
 			}
 		}()
+	}
+
+	// Miner TCP ingress (privileged), mirroring the miner UDP path for
+	// reliable delivery of large block/subtree payloads.
+	if cfg.MinerTCPListenPort > 0 {
+		minerTCP := worker.NewTCPIngress(fwd, ifaces, rec)
+		minerTCP.SetIngressClass(forwarder.IngressPrivileged)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := minerTCP.Run(cfg.ListenAddr, cfg.MinerTCPListenPort, done); err != nil {
+				slog.Error("miner TCP ingress exited with error", "err", err)
+			}
+		}()
+		slog.Info("miner TCP ingress enabled (privileged frames)", "tcp_listen_port", cfg.MinerTCPListenPort)
 	}
 
 	// ── BRC-139 manifest consumer (auto-shard-config) ────────────────────

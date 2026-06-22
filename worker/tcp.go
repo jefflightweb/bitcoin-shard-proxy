@@ -41,6 +41,7 @@ type TCPIngress struct {
 	ifaces []*net.Interface
 	rec    *metrics.Recorder
 	log    *slog.Logger
+	class  forwarder.IngressClass
 }
 
 // NewTCPIngress constructs a TCPIngress. No sockets are opened until [Run] is
@@ -52,6 +53,14 @@ func NewTCPIngress(fwd *forwarder.Forwarder, ifaces []*net.Interface, rec *metri
 		rec:    rec,
 		log:    slog.Default().With("component", "tcp-ingress"),
 	}
+}
+
+// SetIngressClass sets the frame-class gate for this TCP listener. The zero
+// value ([forwarder.IngressPrivileged]) accepts every frame class;
+// [forwarder.IngressTransaction] rejects block/coinbase/subtree-data frames.
+// Call before [Run].
+func (ti *TCPIngress) SetIngressClass(c forwarder.IngressClass) {
+	ti.class = c
 }
 
 // Run starts the TCP accept loop on listenAddr:listenPort. It blocks until
@@ -199,16 +208,11 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(hdrSize + payLen)
 		}
-		switch frameBuf[6] {
-		case frame.FrameVerV4:
-			ti.fwd.ProcessBlock(egr, frameBuf, remote, -1)
-		case frame.FrameVerV5:
-			ti.fwd.ProcessSubtreeData(egr, frameBuf, remote, -1)
-		case frame.FrameVerV6:
-			ti.fwd.ProcessAnchor(egr, frameBuf, remote, -1)
-		default:
-			ti.fwd.Process(egr, frameBuf, remote, -1)
-		}
+		// The full frame is already read off the stream, so a class
+		// rejection (block/coinbase/subtree on a transaction-only socket)
+		// drops it without corrupting stream framing. DispatchClass is the
+		// single routing authority shared with the UDP path.
+		ti.fwd.DispatchClass(egr, frameBuf, remote, -1, ti.class)
 		// TCP path: flush per frame to keep reliable-delivery latency low.
 		if egr != nil {
 			egr.Flush()
