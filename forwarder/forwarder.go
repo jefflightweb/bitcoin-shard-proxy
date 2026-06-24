@@ -147,6 +147,7 @@ type Forwarder struct {
 	log          *slog.Logger
 	fragDataSize int    // >0 = fragmentation enabled; fragment capacity per datagram
 	bindSource   net.IP // optional; when non-nil egress sockets are syscall.Bind'd to this IPv6 so SSM receivers can pre-declare it
+	stampSource  bool   // when true, always (re)stamp HashKey from the observed source IP, even if the sender pre-stamped it (authoritative source identity for own-traffic exclusion); false behind a source-rewriting LB
 	hopLimit     int    // IPV6_MULTICAST_HOPS for egress; 0 = leave kernel default (1)
 	egressLoop   bool   // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast enters the kernel MFC and is forwarded to tunnel/consumer OIFs
 
@@ -216,6 +217,18 @@ func (fw *Forwarder) Bridging() *BridgingEngine {
 // Must be called before [OpenTargets].
 func (fw *Forwarder) SetBindSource(ip net.IP) {
 	fw.bindSource = ip
+}
+
+// SetStampSource controls whether the proxy authoritatively (re)stamps the BRC
+// HashKey from the observed packet source IP. When true (default), a sender-
+// supplied HashKey is overwritten with seqhash.Hash(observedSrc, groupIdx,
+// subtreeID) — so the per-flow identity is the real ingress source, which is
+// what makes own-traffic exclusion per-consumer at a direct edge. Set false
+// only when a load balancer / upstream proxy rewrites the source (every
+// consumer would otherwise collapse to the LB address); the sender's HashKey is
+// then preserved.
+func (fw *Forwarder) SetStampSource(on bool) {
+	fw.stampSource = on
 }
 
 // SetEgressHopLimit configures IPV6_MULTICAST_HOPS for every egress socket.
@@ -1065,9 +1078,14 @@ func stampInPlace(raw []byte, ip [16]byte, groupIdx uint32, subtreeID [32]byte, 
 		binary.BigEndian.PutUint64(raw[48:56], seqNum)
 		return
 	}
-	if preHash == 0 {
-		// SeqNum was pre-stamped by the sender (e.g. gap-injection mode);
-		// derive and stamp HashKey without advancing the flow counter.
+	if preHash == 0 || fw.stampSource {
+		// SeqNum was pre-stamped by the sender (e.g. gap-injection mode), so the
+		// nextSeq counter is not advanced here. Stamp the HashKey from the
+		// observed source whenever it was left zero OR the proxy is configured to
+		// authoritatively own the source identity (stampSource) — overwriting any
+		// sender-supplied HashKey so own-traffic exclusion keys on the real
+		// ingress source. (When behind a source-rewriting LB, stampSource=false
+		// preserves the sender's HashKey.)
 		binary.BigEndian.PutUint64(raw[40:48], seqhash.Hash(ip, groupIdx, subtreeID))
 	}
 }

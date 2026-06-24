@@ -96,13 +96,14 @@ type Config struct {
 	MinPoWBits      uint32
 
 	// Sharding
-	ShardBits  uint   // Number of txid prefix bits used as the group key (1–15)
-	NumGroups  uint32 // Derived: 1 << ShardBits — total distinct multicast groups
-	MCScope    string // "site" | "global" — see shard.Scope. Legacy values "link"/"org" are still accepted in ASM mode.
-	MCPrefix   uint16 // Derived from (SourceMode, MCScope) — upper 16 bits of the IPv6 group address
-	MCGroupID  uint16 // IANA group-id occupying bytes 12–13 (default 0x000B)
-	SourceMode string // "asm" (default) | "ssm" — selects ASM (FF0x) vs SSM (FF3x) addressing per RFC 4607
-	BindSource string // Optional IPv6 literal; when SSM is enabled each proxy replica MUST bind a distinct source IPv6 so receivers can pre-declare it in (S,G) joins
+	ShardBits   uint   // Number of txid prefix bits used as the group key (1–15)
+	NumGroups   uint32 // Derived: 1 << ShardBits — total distinct multicast groups
+	MCScope     string // "site" | "global" — see shard.Scope. Legacy values "link"/"org" are still accepted in ASM mode.
+	MCPrefix    uint16 // Derived from (SourceMode, MCScope) — upper 16 bits of the IPv6 group address
+	MCGroupID   uint16 // IANA group-id occupying bytes 12–13 (default 0x000B)
+	SourceMode  string // "asm" (default) | "ssm" — selects ASM (FF0x) vs SSM (FF3x) addressing per RFC 4607
+	BindSource  string // Optional IPv6 literal; when SSM is enabled each proxy replica MUST bind a distinct source IPv6 so receivers can pre-declare it in (S,G) joins
+	StampSource bool   // When true (default), the proxy AUTHORITATIVELY stamps the BRC HashKey from the OBSERVED packet source IP — overriding any value the sender supplied — so the per-flow identity is the real ingress source. This is what makes own-traffic exclusion per-consumer in a collapsed/direct-ingress edge (the proxy sees each consumer's distinct source). Set false ONLY when the proxy sits behind a load balancer / proxy that rewrites the source (every consumer would then appear as the LB's address) — there the upstream-supplied HashKey is trusted instead.
 
 	// Runtime
 	NumWorkers   int           // Worker goroutine count; defaults to runtime.NumCPU()
@@ -220,6 +221,8 @@ func Load() (*Config, error) {
 		"multicast addressing model: asm | ssm (SSM uses FF3x::/32 per RFC 4607; requires PIM-SSM in fabric)")
 	flag.StringVar(&c.BindSource, "bind-source", envStr("BIND_SOURCE", ""),
 		"optional IPv6 literal to bind for multicast egress (required and MUST be unique per replica when source-mode=ssm)")
+	flag.BoolVar(&c.StampSource, "stamp-source", envBool("STAMP_SOURCE", true),
+		"authoritatively stamp the BRC HashKey from the observed packet source IP (default true; makes own-traffic exclusion per-consumer at a direct edge). Set false only behind a source-rewriting load balancer.")
 	groupIDFlag := flag.String("mc-group-id", envStr("MC_GROUP_ID", "0x000B"),
 		"IANA group-id (bytes 12–13 of the IPv6 multicast address); default 0x000B (IANA Bitcoin)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),

@@ -200,6 +200,10 @@ func main() {
 		fwd.SetBindSource(ip)
 		slog.Info("multicast egress source bound", "bind_source", ip.String(), "source_mode", cfg.SourceMode)
 	}
+	fwd.SetStampSource(cfg.StampSource)
+	if !cfg.StampSource {
+		slog.Warn("authoritative source stamping DISABLED (-stamp-source=false): HashKey trusts the sender; use only behind a source-rewriting load balancer")
+	}
 
 	// Optional ingress TxID dedup. Two-tier: tier-1 local LRU (hot path) →
 	// tier-2 modular cache backend SETNX (redis/aerospike/memory/none).
