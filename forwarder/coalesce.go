@@ -1,7 +1,10 @@
 package forwarder
 
 import (
+	"encoding/binary"
+
 	"github.com/lightwebinc/shard-common/bundle"
+	"github.com/lightwebinc/shard-common/frame"
 )
 
 // DefaultCoalesceMaxBytes is the bundle datagram cap used when coalescing is
@@ -62,6 +65,55 @@ func (c *coalBuffer) add(ip [16]byte, group uint32, subtree, txid [32]byte, payl
 // next batch overwrite the bucket headers (and their member-slice references to
 // now-stale receive buffers) on append.
 func (c *coalBuffer) reset() { c.buckets = c.buckets[:0] }
+
+// ProcessBundle re-emits an already-coalesced BRC-142 bundle datagram verbatim
+// to its shard group. A bundle is a complete, self-describing multicast frame —
+// its HashKey/SeqNum were stamped by the coalescing origin (a collapsed or
+// ingress proxy) — so a relay forwards it UNCHANGED: not re-coalesced, not
+// re-stamped, not split. This is the regional spine's path (it collects
+// ingress-coalesced bundles over the unicast pipeline and re-emits each as one
+// multicast datagram), so the upstream packing turns into one egress datagram /
+// one AF_XDP TX descriptor here.
+//
+// The group is read from the bundle header (GroupIdx at offset 56) rather than
+// derived from a TxID: a bundle carries many transactions and is bound to the
+// single group it was built for. raw must remain valid until egr.Flush returns.
+func (fw *Forwarder) ProcessBundle(egr *Egress, raw []byte, workerID int) {
+	iface := func() string {
+		if egr != nil && len(egr.targets) > 0 {
+			return egr.targets[0].Iface.Name
+		}
+		return ""
+	}
+	if len(raw) < bundle.HeaderSize {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(iface(), workerID, "bundle_short")
+		}
+		return
+	}
+	// Cheap structural validation of an untrusted relayed datagram before a
+	// verbatim re-emit: the BSV magic and a self-consistent declared payload
+	// length (raw[62:66]). Members are opaque pass-through bytes (never indexed
+	// here), so this is the whole integrity check — it stops a corrupt header
+	// (e.g. a garbage GroupIdx) from silently mis-routing the bundle to the wrong
+	// group, and gives upstream corruption an observable counter.
+	if binary.BigEndian.Uint32(raw[0:4]) != frame.MagicBSV ||
+		bundle.HeaderSize+int(binary.BigEndian.Uint32(raw[62:66])) > len(raw) {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(iface(), workerID, "bundle_malformed")
+		}
+		return
+	}
+	if egr == nil {
+		return
+	}
+	group := uint32(binary.BigEndian.Uint16(raw[56:58]))
+	dst := fw.addrFor(group)
+	egr.EnqueueData(raw, *dst, group, workerID)
+	if fw.rec != nil {
+		fw.rec.CoalesceFlushed(iface(), workerID, int(binary.BigEndian.Uint16(raw[60:62])), "relay")
+	}
+}
 
 // FlushCoalesced packs the per-flow buffered members on egr into BRC-142 bundle
 // datagrams and enqueues them, then resets the buffer. Called by the worker at

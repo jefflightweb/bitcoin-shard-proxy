@@ -501,6 +501,15 @@ func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, worker
 			fw.rec.IngressMetered(metrics.IngressClassAnchor, privileged, n)
 		}
 		fw.ProcessAnchor(egr, raw, src, workerID)
+	case n > 6 && raw[6] == frame.FrameVerV8:
+		// BRC-142 bundle: an already-coalesced datagram of many transactions.
+		// Re-emit it verbatim to its group (a relay/spine forwarding bundles a
+		// collapsed/ingress proxy coalesced upstream). Bundles are tx-class, so
+		// no miner-tier gate; the origin already authorised the members.
+		if fw.rec != nil {
+			fw.rec.IngressMetered(metrics.IngressClassTx, privileged, n)
+		}
+		fw.ProcessBundle(egr, raw, workerID)
 	default:
 		if fw.rec != nil {
 			fw.rec.IngressMetered(metrics.IngressClassTx, privileged, n)

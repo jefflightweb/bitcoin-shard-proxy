@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
 	"testing"
 
@@ -144,6 +145,79 @@ func TestCoalesce_ExcludedWhenBatchCapOne(t *testing.T) {
 	sent := drain(egr)
 	if len(sent) != 1 || frame.IsBundle(sent[0]) {
 		t.Fatalf("batchHint=1 frame must be forwarded individually (not stranded/bundled); sent=%d", len(sent))
+	}
+}
+
+// A relay (the spine) receiving an already-coalesced bundle must re-emit it
+// verbatim to the bundle's group — not drop it as a decode error, not
+// re-coalesce, not re-stamp. Dispatch is called with src=nil (the spine
+// re-emit), and coalescing is OFF on the relay (it forwards origin bundles).
+func TestProcessBundle_RelaysVerbatim(t *testing.T) {
+	fw := makeForwarder() // coalescing OFF: a relay forwards, it does not originate
+	conn, _ := openLoopbackUDP(t)
+	egr := NewEgress(fw, makeTargets(t, conn), 8, nil)
+
+	in := &bundle.Bundle{
+		Flags:     bundle.FlagTxIDsPresent,
+		GroupIdx:  7,
+		ShardBits: 8,
+		HashKey:   0xDEADBEEF,
+		SeqNum:    42,
+		Members: []bundle.Member{
+			{TxID: [32]byte{0x01}, Tx: []byte("tx-a")},
+			{TxID: [32]byte{0x02}, Tx: []byte("tx-b")},
+		},
+	}
+	raw, err := in.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	fw.Dispatch(egr, raw, nil, 0) // src=nil: the spine re-emit
+	sent := drain(egr)
+	if len(sent) != 1 {
+		t.Fatalf("relay sent %d datagrams, want 1", len(sent))
+	}
+	if !bytes.Equal(sent[0], raw) {
+		t.Fatal("relayed bundle is not byte-identical to the input (must be verbatim)")
+	}
+	out, err := bundle.Decode(sent[0])
+	if err != nil {
+		t.Fatalf("decode relayed: %v", err)
+	}
+	if out.GroupIdx != 7 || out.HashKey != 0xDEADBEEF || out.SeqNum != 42 {
+		t.Errorf("relay re-stamped the bundle: group=%d hashkey=%#x seq=%d", out.GroupIdx, out.HashKey, out.SeqNum)
+	}
+	if len(out.Members) != 2 {
+		t.Errorf("relayed members = %d, want 2", len(out.Members))
+	}
+}
+
+// A bundle with corrupted magic or a payload length exceeding the datagram is
+// dropped by the relay (not mis-routed), since members are forwarded opaquely.
+func TestProcessBundle_DropsMalformed(t *testing.T) {
+	fw := makeForwarder()
+	conn, _ := openLoopbackUDP(t)
+	egr := NewEgress(fw, makeTargets(t, conn), 8, nil)
+
+	good := &bundle.Bundle{GroupIdx: 3, Members: []bundle.Member{{Tx: []byte("x")}}}
+	raw, err := good.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	bad := append([]byte(nil), raw...)
+	bad[0] ^= 0xFF // corrupt the magic
+	fw.Dispatch(egr, bad, nil, 0)
+	if got := drain(egr); len(got) != 0 {
+		t.Fatalf("bad-magic bundle should be dropped, relayed %d", len(got))
+	}
+
+	trunc := append([]byte(nil), raw...)
+	binary.BigEndian.PutUint32(trunc[62:66], 0xFFFF) // declared payload > datagram
+	fw.Dispatch(egr, trunc, nil, 0)
+	if got := drain(egr); len(got) != 0 {
+		t.Fatalf("truncated bundle should be dropped, relayed %d", len(got))
 	}
 }
 
