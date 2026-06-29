@@ -188,6 +188,11 @@ func main() {
 		fwd.SetFragMTU(cfg.FragMTU)
 		slog.Info("BRC-130 fragmentation enabled", "frag_mtu", cfg.FragMTU)
 	}
+	if cfg.Coalesce {
+		fwd.SetCoalesce(true, cfg.CoalesceMaxBytes, cfg.CoalesceMaxMembers, cfg.CoalesceCarryTxid)
+		slog.Info("BRC-142 frame coalescing enabled",
+			"max_bytes", cfg.CoalesceMaxBytes, "max_members", cfg.CoalesceMaxMembers, "carry_txid", cfg.CoalesceCarryTxid)
+	}
 	if cfg.BindSource != "" {
 		ip := net.ParseIP(cfg.BindSource)
 		// Config-time validation already ensured IPv6 when SSM; this is

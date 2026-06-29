@@ -167,6 +167,12 @@ type Recorder struct {
 	framesFragmented metric.Int64Counter
 	fragmentsEmitted metric.Int64Counter
 
+	// Coalescing counters (BRC-142) — cold path: fire once per flushed bundle.
+	coalesceBundles      metric.Int64Counter
+	coalesceMembers      metric.Int64Counter
+	coalesceFlush        metric.Int64Counter
+	coalesceMembersHisto metric.Int64Histogram
+
 	// Control-plane forwarding (TCP ingress + BRC-127)
 	ctrlFramesForwarded metric.Int64Counter
 	tcpConnections      metric.Int64Counter
@@ -422,6 +428,24 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 
+	if r.coalesceBundles, err = meter.Int64Counter("bsp_coalesce_bundles_total",
+		metric.WithDescription("BRC-142 coalesced bundle datagrams flushed to egress")); err != nil {
+		return nil, err
+	}
+	if r.coalesceMembers, err = meter.Int64Counter("bsp_coalesce_members_total",
+		metric.WithDescription("Total member transactions packed into BRC-142 bundles")); err != nil {
+		return nil, err
+	}
+	if r.coalesceFlush, err = meter.Int64Counter("bsp_coalesce_flush_total",
+		metric.WithDescription("BRC-142 coalesce flushes by reason (batch, encode_error)")); err != nil {
+		return nil, err
+	}
+	if r.coalesceMembersHisto, err = meter.Int64Histogram("bsp_coalesce_members_per_bundle",
+		metric.WithDescription("Distribution of member transactions per BRC-142 bundle"),
+		metric.WithExplicitBucketBoundaries(1, 2, 4, 8, 16, 32, 64, 128, 256)); err != nil {
+		return nil, err
+	}
+
 	if r.ctrlFramesForwarded, err = meter.Int64Counter("bsp_control_frames_forwarded_total",
 		metric.WithDescription("BRC-127 control datagrams forwarded to multicast (e.g. SubtreeGroupAnnounce)")); err != nil {
 		return nil, err
@@ -515,6 +539,27 @@ func (r *Recorder) FrameFragmented(workerID int, k int) {
 	ctx := context.Background()
 	r.framesFragmented.Add(ctx, 1, opt)
 	r.fragmentsEmitted.Add(ctx, int64(k), opt)
+}
+
+// CoalesceFlushed records one flushed BRC-142 bundle of n member transactions.
+// reason is "batch" (the normal per-batch flush) or "encode_error". Cold path
+// (fires once per bundle, not per frame), so it uses OTel like FrameFragmented.
+func (r *Recorder) CoalesceFlushed(iface string, workerID, n int, reason string) {
+	ctx := context.Background()
+	opt := metric.WithAttributes(
+		attribute.Int("worker", workerID),
+		ifaceAttr(iface),
+	)
+	r.coalesceFlush.Add(ctx, 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
+		ifaceAttr(iface),
+		attribute.String("reason", reason),
+	))
+	if n > 0 {
+		r.coalesceBundles.Add(ctx, 1, opt)
+		r.coalesceMembers.Add(ctx, int64(n), opt)
+		r.coalesceMembersHisto.Record(ctx, int64(n), opt)
+	}
 }
 
 // ControlFrameForwarded records a BRC-127 control datagram forwarded via ForwardControl.

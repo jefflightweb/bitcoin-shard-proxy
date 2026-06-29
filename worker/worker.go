@@ -275,6 +275,10 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 			w.fwd.DispatchClass(egr, buf[:n], src, w.id, w.class)
 		}
 
+		// Pack any BRC-142 coalescing buffer accumulated this batch into bundle
+		// datagrams before Flush, while the member payloads (slices into the
+		// reused receive buffers) are still valid. No-op when coalescing is off.
+		w.fwd.FlushCoalesced(egr, w.id)
 		egr.Flush()
 	}
 }

@@ -54,6 +54,7 @@ import (
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
+	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/pow"
 	"github.com/lightwebinc/shard-common/seqhash"
@@ -150,6 +151,15 @@ type Forwarder struct {
 	stampSource  bool   // when true, always (re)stamp HashKey from the observed source IP, even if the sender pre-stamped it (authoritative source identity for own-traffic exclusion); false behind a source-rewriting LB
 	hopLimit     int    // IPV6_MULTICAST_HOPS for egress; 0 = leave kernel default (1)
 	egressLoop   bool   // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast enters the kernel MFC and is forwarded to tunnel/consumer OIFs
+
+	// coalesce enables BRC-142 within-batch frame coalescing: eligible small
+	// transactions are buffered per (sender, group, subtree) during a receive
+	// batch and packed into bundle datagrams at batch end to cut egress
+	// packets-per-second. Opt-in, off by default. See coalesce.go.
+	coalesce           bool
+	coalesceMaxBytes   int  // bundle datagram cap in bytes; resolved >0 by SetCoalesce
+	coalesceMaxMembers int  // members per bundle; ≤0 ⇒ uint16 max (MTU-bound in practice)
+	coalesceCarryTxid  bool // carry per-member TxID on the wire vs recompute on receipt
 
 	// requireBlockPoW gates BRC-131 block-announce frames on a cheap stateless
 	// proof-of-work check (the permissionless complement to admission control):
@@ -268,6 +278,24 @@ func (fw *Forwarder) SetBlockPoW(require bool, floorBits uint32) {
 	} else {
 		fw.powFloor = nil
 	}
+}
+
+// SetCoalesce enables BRC-142 within-batch frame coalescing. When enabled,
+// eligible BRC-124/128 transactions are buffered per (sender, group, subtree)
+// during each receive batch and packed into bundle datagrams at batch end,
+// cutting egress packets-per-second for shard-dense traffic at zero added
+// latency (the window is one receive batch). maxBytes caps the bundle datagram
+// (≤0 ⇒ [DefaultCoalesceMaxBytes]); maxMembers caps members per bundle (≤0 ⇒
+// uint16 max); carryTxid includes the per-member TxID on the wire. Off by
+// default; must be called before any worker constructs its Egress.
+func (fw *Forwarder) SetCoalesce(enabled bool, maxBytes, maxMembers int, carryTxid bool) {
+	fw.coalesce = enabled
+	if maxBytes <= 0 {
+		maxBytes = DefaultCoalesceMaxBytes
+	}
+	fw.coalesceMaxBytes = maxBytes
+	fw.coalesceMaxMembers = maxMembers
+	fw.coalesceCarryTxid = carryTxid
 }
 
 // SetTxidDedup attaches a TxID claim store used to suppress ingress
@@ -546,6 +574,17 @@ func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int
 		// BRC-130 fragmentation path: payload exceeds per-datagram capacity.
 		if fw.fragDataSize > 0 && len(f.Payload) > fw.fragDataSize {
 			fw.fragment(egr, f, ip, groupIdx, workerID)
+			return
+		}
+
+		// BRC-142 within-batch coalescing: buffer eligible small txs into the
+		// per-worker bundle buffer (flushed at batch end). Skipped during a
+		// live-reshard bridging window (a bundle is not dual-emitted) and when a
+		// single member would not fit the bundle MTU. The bundle — not the
+		// member — is HashKey/SeqNum-stamped at flush, so raw is left untouched.
+		if fw.coalesce && egr != nil && egr.coal != nil && fw.bridging.Load() == nil &&
+			bundle.HeaderSize+bundle.MemberOverhead(fw.coalesceCarryTxid)+len(f.Payload) <= fw.coalesceMaxBytes {
+			egr.coal.add(ip, groupIdx, f.SubtreeID, f.TxID, f.Payload)
 			return
 		}
 

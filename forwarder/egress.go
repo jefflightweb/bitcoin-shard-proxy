@@ -65,6 +65,11 @@ type Egress struct {
 	pool     *sync.Pool
 	poolSize int
 
+	// coal buffers BRC-142 coalescing members during a batch (nil unless the
+	// forwarder has coalescing enabled). Drained by Forwarder.FlushCoalesced
+	// before Flush. Owned by this Egress's single worker goroutine.
+	coal *coalBuffer
+
 	log *slog.Logger
 	rec *metrics.Recorder
 
@@ -118,6 +123,14 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 				return &b
 			},
 		}
+	}
+	// Coalescing needs a multi-frame batch to coalesce over, so it is enabled
+	// only when batchHint > 1 (the UDP recvmmsg workers). The TCP ingress Egress
+	// (batchHint = 1, flushes per frame and never calls FlushCoalesced) and the
+	// legacy per-packet UDP path (-recv-batch 1) get coal == nil, so Process
+	// never diverts to coalescing there and no member is ever stranded.
+	if fw != nil && fw.coalesce && batchHint > 1 {
+		e.coal = newCoalBuffer(fw.coalesceMaxMembers)
 	}
 	return e
 }

@@ -28,6 +28,10 @@
 //	-otlp-endpoint        OTLP_ENDPOINT         ""        OTLP gRPC endpoint (empty = disabled)
 //	-otlp-interval        OTLP_INTERVAL         30s       OTLP push interval
 //	-frag-mtu             FRAG_MTU              0         Path MTU for BRC-130 fragmentation (0 = disabled)
+//	-coalesce             COALESCE              false     Opt-in BRC-142 frame coalescing
+//	-coalesce-max-bytes   COALESCE_MAX_BYTES    1500      Max coalesced bundle datagram size
+//	-coalesce-max-members COALESCE_MAX_MEMBERS  0         Max members per bundle (0 = MTU-bound)
+//	-coalesce-carry-txid  COALESCE_CARRY_TXID   false     Carry per-member TxID in the bundle
 //	-recv-batch           BSP_RECV_BATCH        32        Datagrams per recvmmsg syscall (1 = per-packet)
 //	-txid-dedup-redis-addr TXID_DEDUP_REDIS_ADDR ""       Redis address for ingress TxID dedup (empty = local-only)
 //	-txid-dedup-prefix    TXID_DEDUP_PREFIX     bsp:tx:   Redis key prefix for ingress dedup entries
@@ -117,6 +121,14 @@ type Config struct {
 	// 0 disables fragmentation (frames are forwarded verbatim regardless of size).
 	// Typical value: 1500 (Ethernet), 9000 (jumbo frames).
 	FragMTU int
+
+	// Coalescing (BRC-142 bundle frame)
+	// Opt-in: pack many small same-(group, subtree) transactions arriving in one
+	// receive batch into a single bundle datagram to cut egress pps. Off by default.
+	Coalesce           bool
+	CoalesceMaxBytes   int  // max bundle datagram size (0 ⇒ 1500, the Ethernet MTU baseline)
+	CoalesceMaxMembers int  // max members per bundle (0 ⇒ MTU-bound)
+	CoalesceCarryTxid  bool // include per-member TxID on the wire (dedup/billing) vs recompute
 
 	// RecvBatch is the number of datagrams a worker requests per recvmmsg
 	// syscall (and matching default queue capacity for sendmmsg-style
@@ -237,6 +249,14 @@ func Load() (*Config, error) {
 		"pre-drain delay before closing ingress sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.IntVar(&c.FragMTU, "frag-mtu", envInt("FRAG_MTU", 0),
 		"path MTU for BRC-130 fragmentation (0 = disabled; typical: 1500 for Ethernet, 9000 for jumbo)")
+	flag.BoolVar(&c.Coalesce, "coalesce", envBool("COALESCE", false),
+		"opt-in BRC-142 frame coalescing (pack many small same-(group,subtree) tx per datagram to cut pps)")
+	flag.IntVar(&c.CoalesceMaxBytes, "coalesce-max-bytes", envInt("COALESCE_MAX_BYTES", 1500),
+		"max coalesced bundle datagram size in bytes (typical: 1500 Ethernet, 9000 jumbo)")
+	flag.IntVar(&c.CoalesceMaxMembers, "coalesce-max-members", envInt("COALESCE_MAX_MEMBERS", 0),
+		"max member transactions per bundle (0 = MTU-bound)")
+	flag.BoolVar(&c.CoalesceCarryTxid, "coalesce-carry-txid", envBool("COALESCE_CARRY_TXID", false),
+		"carry per-member TxID in the bundle (dedup/billing) instead of recomputing on receipt")
 	flag.IntVar(&c.RecvBatch, "recv-batch", envInt("BSP_RECV_BATCH", 32),
 		"datagrams per recvmmsg syscall (1 = per-packet legacy path; 32 default)")
 	flag.IntVar(&c.RecvBufBytes, "recv-buf-bytes", envInt("BSP_RECV_BUF_BYTES", 0),
