@@ -16,6 +16,8 @@ subscribers of the corresponding group. Further traffic segmentation is provided
 via subtree-level sharding. Reliable delivery to multicast receivers is supported
 via monotonic transmission flow sequencing. The TCP ingress also forwards
 BRC-127 SubtreeGroupAnnounce datagrams to the control-plane multicast group.
+Opt-in BRC-142 coalescing packs many small transactions into a single bundle
+datagram at the origin edge to cut egress packets-per-second.
 
 Inspiration: [Multicast within Multicast: Anycast](https://singulargrit.substack.com/p/multicast-within-multicast-anycast), [Multicast as the Only Viable Architecture](https://singulargrit.substack.com/p/multicast-as-the-only-viable-architecture)
 
@@ -97,6 +99,17 @@ With Source-Specific Multicast (RFC 4607) — see [SSM Support Plan](https://git
 (FF35 for site scope, FF3E for global per RFC 8815). `-bind-source` is
 mandatory in SSM mode and MUST differ across replicas — anycast or
 ECMP-shared sources break PIM-SSM RPF.
+
+With opt-in BRC-142 coalescing (pack many small transactions per bundle
+datagram at the origin edge; a relay spine forwards bundles verbatim) — see
+[docs/configuration.md](docs/configuration.md#brc-142-coalescing-origin-side):
+
+```bash
+./shard-proxy \
+  -iface              eth0 \
+  -coalesce \                    # opt-in; off by default
+  -coalesce-max-bytes 1500       # Ethernet-MTU bundles
+```
 
 With opt-in BRC-139 auto-shard-config (manifest-driven `ShardBits` adoption) — see [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration):
 

@@ -5,38 +5,45 @@ as fallbacks; hard-coded defaults apply when neither is present.
 
 ## Flags and Environment Variables
 
-| Flag | Env var | Default | Description |  |  |  |
-|--------------------|-------------------|--------------------|----------------------------------------------------------------------------------------------------|----------|---------|----------|
-| `-listen` | `LISTEN_ADDR` | `[::]` | Ingress bind address (without port) |  |  |  |
-| `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP listen port for incoming BSV transaction frames (BRC-12, BRC-124, or BRC-128) |  |  |  |
-| `-tcp-listen-port` | `TCP_LISTEN_PORT` | `0` | TCP ingress port for reliable delivery (0 = disabled) |  |  |  |
-| `-miner-listen-port` | `MINER_LISTEN_PORT` | `0` | UDP miner ingress for privileged frames (BRC-131 block / BRC-133 coinbase / BRC-132 subtree data); 0 = disabled. See [Miner-tier ingress gate](#miner-tier-ingress-gate) |  |  |  |
-| `-miner-tcp-listen-port` | `MINER_TCP_LISTEN_PORT` | `0` | TCP miner ingress for privileged frames; 0 = disabled |  |  |  |
-| `-tx-accept-privileged` | `TX_ACCEPT_PRIVILEGED` | `false` | Let the user transaction ingress also accept privileged frames (legacy single-port behaviour). `false` = the user port is transaction-only |  |  |  |
-| `-require-block-pow` | `REQUIRE_BLOCK_POW` | `false` | Gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header. Permissionless (validates work, not identity). See [Block-announce proof-of-work](#block-announce-proof-of-work) |  |  |  |
-| `-min-pow-bits` | `MIN_POW_BITS` | `0` | PoW difficulty floor in Bitcoin compact `nBits` form (e.g. `0x1d00ffff`); `0` = header self-consistency only (weak) |  |  |  |
-| `-iface` | `MULTICAST_IF` | `eth0` | Comma-separated NIC names for multicast egress |  |  |  |
-| `-egress-port` | `EGRESS_PORT` | `9001` | Destination UDP port for multicast groups |  |  |  |
-| `-shard-bits` | `SHARD_BITS` | `2` | Key bit width (1–15) |  |  |  |
-| `-scope` | `MC_SCOPE` | `site` | Multicast scope: `link` \ | `site` \ | `org` \ | `global` |
-| `-mc-group-id` | `MC_GROUP_ID` | `0x000B` | IANA group-id (bytes 12–13); default = IANA Bitcoin allocation `FF0X::B` |  |  |  |
-| `-source-mode` | `SOURCE_MODE` | `asm` | Multicast addressing model: `asm` (FF0x; default) or `ssm` (FF3x per RFC 4607). SSM derives the prefix via `shard.Prefix(SSM, scope)` → FF35 site / FF3E global; RFC 8815 deprecates ASM at global scope and is rejected. Requires PIM-SSM in the fabric. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm). |  |  |  |
-| `-bind-source` | `BIND_SOURCE` | `""` | IPv6 literal bound on every multicast egress socket via `syscall.Bind` in `openEgressSocket`. **Required when `-source-mode=ssm`** and MUST be distinct per replica — anycast/ECMP-shared sources break PIM-SSM RPF. For single-identity deployments use VRRP active-standby. |  |  |  |
-| `-workers` | `NUM_WORKERS` | `runtime.NumCPU()` | Worker goroutine count (0 = NumCPU) |  |  |  |
-| `-debug` | `DEBUG` | `false` | Enable per-packet debug logging and multicast loopback |  |  |  |
-| `-drain-timeout` | `DRAIN_TIMEOUT` | `0s` | Pre-drain delay before closing sockets; `/readyz` returns 503 during this window (`0s` = disabled) |  |  |  |
-| `-metrics-addr` | `METRICS_ADDR` | `:9100` | HTTP bind address for `/metrics`, `/healthz`, `/readyz` |  |  |  |
-| `-instance` | `INSTANCE_ID` | hostname | OTel `service.instance.id` for federation |  |  |  |
-| `-otlp-endpoint` | `OTLP_ENDPOINT` | `""` | OTLP gRPC endpoint (empty = disabled) |  |  |  |
-| `-otlp-interval` | `OTLP_INTERVAL` | `30s` | OTLP push interval |  |  |  |
-| `-log-format` | `LOG_FORMAT` | `text` | Log output format: `text` (stderr, dev default) or `json` (stdout, for fleet aggregation). See [Unified Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) |  |  |  |
-| `-log-level` | `LOG_LEVEL` | `info` | Log level: `debug` \| `info` \| `warn` \| `error`. Runtime-togglable via `POST /loglevel?level=` and SIGHUP. `-debug` is a deprecated alias for `debug` |  |  |  |
-| `-trace-sampling` | `TRACE_SAMPLING` | `0` | Distributed-trace head sampling ratio `0`–`1` (`0` = tracing off, no-op tracer; exports via `-otlp-endpoint`; control-plane only, never the packet hot path) |  |  |  |
-| `-frag-mtu` | `FRAG_MTU` | `0` | Path MTU for BRC-130 fragmentation (0 = disabled) |  |  |  |
-| `-recv-batch` | `BSP_RECV_BATCH` | `32` | Datagrams per `recvmmsg` syscall (1 = per-packet legacy path) |  |  |  |
-| `-recv-buf-bytes` | `BSP_RECV_BUF_BYTES` | `0` | Per-worker `SO_RCVBUF` in bytes (`0` = system default; capped by `net.core.rmem_max`) |  |  |  |
-| `-ingress-dedup` | `INGRESS_DEDUP` | `true` | Enable ingress TxID dedup. `false` bypasses the dedup gate entirely — only sound for single-proxy ingest topologies. See [Ingress TxID Deduplication](#ingress-txid-deduplication) |  |  |  |
-| `-pprof` | `BSP_PPROF` | `false` | Mount `net/http/pprof` at `/debug/pprof/*` on the metrics server (profiling only) |  |  |  |
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `-listen` | `LISTEN_ADDR` | `[::]` | Ingress bind address (without port) |
+| `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP listen port for incoming BSV transaction frames (BRC-12, BRC-124, or BRC-128) |
+| `-tcp-listen-port` | `TCP_LISTEN_PORT` | `0` | TCP ingress port for reliable delivery (0 = disabled) |
+| `-miner-listen-port` | `MINER_LISTEN_PORT` | `0` | UDP miner ingress for privileged frames (BRC-131 block / BRC-133 coinbase / BRC-132 subtree data); 0 = disabled. See [Miner-tier ingress gate](#miner-tier-ingress-gate) |
+| `-miner-tcp-listen-port` | `MINER_TCP_LISTEN_PORT` | `0` | TCP miner ingress for privileged frames; 0 = disabled |
+| `-tx-accept-privileged` | `TX_ACCEPT_PRIVILEGED` | `false` | Let the user transaction ingress also accept privileged frames (legacy single-port behaviour). `false` = the user port is transaction-only |
+| `-require-block-pow` | `REQUIRE_BLOCK_POW` | `false` | Gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header. Permissionless (validates work, not identity). See [Block-announce proof-of-work](#block-announce-proof-of-work) |
+| `-min-pow-bits` | `MIN_POW_BITS` | `0` | PoW difficulty floor in Bitcoin compact `nBits` form (e.g. `0x1d00ffff`); `0` = header self-consistency only (weak) |
+| `-iface` | `MULTICAST_IF` | `eth0` | Comma-separated NIC names for multicast egress |
+| `-egress-port` | `EGRESS_PORT` | `9001` | Destination UDP port for multicast groups |
+| `-egress-hoplimit` | `EGRESS_HOPLIMIT` | `1` | IPv6 multicast hop limit (`IPV6_MULTICAST_HOPS`) written on egress. `1` = single L2 segment; raise above 1 for routed/tunneled mesh fabrics where the datagram must cross ip6gre / PIM hops |
+| `-egress-loop` | `EGRESS_MULTICAST_LOOP` | `false` | Enable `IPV6_MULTICAST_LOOP` on egress. Required on collapsed / mesh-router nodes so locally-originated multicast is picked up by the kernel MFC and forwarded to tunnel / consumer OIFs. Off for plain L2 egress |
+| `-shard-bits` | `SHARD_BITS` | `2` | Key bit width (1–15) |
+| `-scope` | `MC_SCOPE` | `site` | Multicast scope: `link` \| `site` \| `org` \| `global` |
+| `-mc-group-id` | `MC_GROUP_ID` | `0x000B` | IANA group-id (bytes 12–13); default = IANA Bitcoin allocation `FF0X::B` |
+| `-source-mode` | `SOURCE_MODE` | `asm` | Multicast addressing model: `asm` (FF0x; default) or `ssm` (FF3x per RFC 4607). SSM derives the prefix via `shard.Prefix(SSM, scope)` → FF35 site / FF3E global; RFC 8815 deprecates ASM at global scope and is rejected. Requires PIM-SSM in the fabric. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm). |
+| `-bind-source` | `BIND_SOURCE` | `""` | IPv6 literal bound on every multicast egress socket via `syscall.Bind` in `openEgressSocket`. **Required when `-source-mode=ssm`** and MUST be distinct per replica — anycast/ECMP-shared sources break PIM-SSM RPF. For single-identity deployments use VRRP active-standby. |
+| `-stamp-source` | `STAMP_SOURCE` | `true` | Authoritatively stamp the BRC HashKey from the **observed** packet source IP, overriding any sender-supplied value, so the per-flow identity is the real ingress source. This is what makes own-traffic exclusion per-consumer at a direct/collapsed edge (the proxy sees each consumer's distinct source). Set `false` **only** behind a source-rewriting load balancer, where every consumer would otherwise appear as the LB address and the upstream-supplied HashKey is trusted instead. |
+| `-workers` | `NUM_WORKERS` | `runtime.NumCPU()` | Worker goroutine count (0 = NumCPU) |
+| `-debug` | `DEBUG` | `false` | Enable per-packet debug logging and multicast loopback |
+| `-drain-timeout` | `DRAIN_TIMEOUT` | `0s` | Pre-drain delay before closing sockets; `/readyz` returns 503 during this window (`0s` = disabled) |
+| `-metrics-addr` | `METRICS_ADDR` | `:9100` | HTTP bind address for `/metrics`, `/healthz`, `/readyz` |
+| `-instance` | `INSTANCE_ID` | hostname | OTel `service.instance.id` for federation |
+| `-otlp-endpoint` | `OTLP_ENDPOINT` | `""` | OTLP gRPC endpoint (empty = disabled) |
+| `-otlp-interval` | `OTLP_INTERVAL` | `30s` | OTLP push interval |
+| `-log-format` | `LOG_FORMAT` | `text` | Log output format: `text` (stderr, dev default) or `json` (stdout, for fleet aggregation). See [Unified Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) |
+| `-log-level` | `LOG_LEVEL` | `info` | Log level: `debug` \| `info` \| `warn` \| `error`. Runtime-togglable via `POST /loglevel?level=` and SIGHUP. `-debug` is a deprecated alias for `debug` |
+| `-trace-sampling` | `TRACE_SAMPLING` | `0` | Distributed-trace head sampling ratio `0`–`1` (`0` = tracing off, no-op tracer; exports via `-otlp-endpoint`; control-plane only, never the packet hot path) |
+| `-frag-mtu` | `FRAG_MTU` | `0` | Path MTU for BRC-130 fragmentation (0 = disabled) |
+| `-coalesce` | `COALESCE` | `false` | Opt-in BRC-142 origin-side frame coalescing (pack many small same-`(group, subtree)` tx per datagram to cut egress pps). See [BRC-142 Coalescing](#brc-142-coalescing-origin-side) |
+| `-coalesce-max-bytes` | `COALESCE_MAX_BYTES` | `1500` | Max coalesced bundle datagram size in bytes (1500 = Ethernet MTU baseline; 9000 for jumbo on a controlled underlay) |
+| `-coalesce-max-members` | `COALESCE_MAX_MEMBERS` | `0` | Max member transactions per bundle (`0` = MTU-bound only) |
+| `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | Carry each member's 32-byte TxID on the wire (for downstream dedup / billing) instead of recomputing it on receipt |
+| `-recv-batch` | `BSP_RECV_BATCH` | `32` | Datagrams per `recvmmsg` syscall (1 = per-packet legacy path) |
+| `-recv-buf-bytes` | `BSP_RECV_BUF_BYTES` | `0` | Per-worker `SO_RCVBUF` in bytes (`0` = system default; capped by `net.core.rmem_max`) |
+| `-ingress-dedup` | `INGRESS_DEDUP` | `true` | Enable ingress TxID dedup. `false` bypasses the dedup gate entirely — only sound for single-proxy ingest topologies. See [Ingress TxID Deduplication](#ingress-txid-deduplication) |
+| `-pprof` | `BSP_PPROF` | `false` | Mount `net/http/pprof` at `/debug/pprof/*` on the metrics server (profiling only) |
 
 ---
 
@@ -198,6 +205,68 @@ For **BRC-134 anchor frames** (`FrameVerV6`), the proxy forwards to `GroupBlockB
 (`FF0X::B:FFFE`). Anchor frames use a virtual `groupIdx` of `0xFFF9` for HashKey derivation
 so anchors are accounted as an independent flow (label `brc134`) distinct from BRC-131 block
 control. See [bsv-multicast/docs/brc-134-anchor-transactions.md](../../../bsv-multicast/docs/brc-134-anchor-transactions.md).
+
+---
+
+## BRC-142 Coalescing (origin-side)
+
+Coalescing is the inverse of BRC-130 fragmentation: instead of splitting one
+large frame across many datagrams, it packs **many small transactions into one
+datagram** — a BRC-142 *bundle* frame (`FrameVer 0x08`, 66-byte header). It is
+opt-in (`-coalesce`, off by default) and trades a small latency/CPU cost for a
+large reduction in egress packets-per-second when the workload is many tiny
+transactions.
+
+Within a single receive batch the worker buckets eligible BRC-124/BRC-128
+transactions by their `(sender, group, subtree)` flow and, at batch end, packs
+each bucket into one or more bundle datagrams (up to the byte/member budget)
+before the egress flush. Each bundle draws its `HashKey`/`SeqNum` from the **same
+per-flow counter** that stamps individual frames, so a flow's bundles and any
+individual frames it also emits share one contiguous sequence space — a listener
+gap-tracks the `(group, subtree, HashKey)` flow uniformly regardless of frame
+version, and NACK/retry treats a bundle as a single "fat frame."
+
+**Origin-only rule.** Coalescing runs **only at the emitting (origin) proxy** —
+the collapsed or ingress edge that first sees the individual transactions. A
+regional spine that *relays* an already-coalesced bundle forwards it
+**verbatim**: it is not re-coalesced, not re-stamped, and not split. A bundle is
+a complete, self-describing multicast frame bound to the single group it was
+built for, so a relay re-emits it unchanged (one bundle in → one multicast
+datagram / one AF_XDP TX descriptor out). Never enable origin coalescing on a
+node whose role is to relay bundles.
+
+| Flag | Env | Default | Notes |
+|------|-----|---------|-------|
+| `-coalesce` | `COALESCE` | `false` | Master switch. Off = every transaction egresses as its own frame (legacy) |
+| `-coalesce-max-bytes` | `COALESCE_MAX_BYTES` | `1500` | Bundle datagram cap. `1500` = public-internet Ethernet MTU (realistic baseline); `9000` for jumbo on a controlled underlay. `0` also means 1500 |
+| `-coalesce-max-members` | `COALESCE_MAX_MEMBERS` | `0` | Hard cap on member transactions per bundle. `0` = bounded only by `-coalesce-max-bytes` (capped by the wire `TxCount` uint16) |
+| `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | When set, each member carries its 32-byte TxID on the wire (for downstream dedup / billing) — an all-or-none flag across the bundle. When unset the receiver recomputes TxIDs, saving 32 B/member |
+
+```bash
+# origin edge: coalesce small tx to cut egress pps, Ethernet-MTU bundles
+shard-proxy \
+  -iface eth0 \
+  -coalesce \
+  -coalesce-max-bytes  1500 \
+  -coalesce-carry-txid           # carry TxIDs for billing/dedup downstream
+```
+
+Wire format (bundle header + member section), the `Coalescer`/`Decoalesce`/
+`Rebucketer` transforms, and the all-or-none TxID flag are specified once in the
+canonical BRC-142 spec — see
+[`shard-common/docs/protocol.md` § BRC-142](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md#3a-brc-142-coalescing-bundle-frame-format)
+and the public
+[bsv-multicast/docs/brc-142-coalescing-frame.md](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-142-coalescing-frame.md).
+Bundles are re-aligned to a receiver's shard generation (re-bucket) and split
+back to individual frames (decoalesce) at the **delivery edge** (listener), not
+in this proxy.
+
+Bundle metrics: `bsp_coalesce_bundles_total` (bundle datagrams flushed) and
+`bsp_coalesce_members_total` (member transactions packed) count origin packing,
+with the per-bundle member count distributed in `bsp_coalesce_members_per_bundle`.
+`bsp_coalesce_flush_total{reason}` records flushes by reason — `batch` for
+origin-packed bundles, `relay` for verbatim spine re-emits, `encode_error` on a
+skipped bundle.
 
 ---
 

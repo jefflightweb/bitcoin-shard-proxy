@@ -123,6 +123,45 @@ Two `MsgType` values are defined:
 | HashesOnly | 0x01 | 32 bytes per subtree node (SHA256 hash only) |
 | FullNodes | 0x02 | 48 bytes per subtree node (hash + fee + size metadata) |
 
+## BRC-142 Bundle (FrameVerV8)
+
+BRC-142 is the inverse of BRC-130 fragmentation: it packs many small
+BRC-124/BRC-128 transactions of one `(sender, group, subtree)` flow into a
+single *bundle* datagram (`FrameVer 0x08`, 66-byte header) to cut egress
+packets-per-second. It is opt-in via `-coalesce` (off by default). The wire
+format is decoded by `shard-common/bundle` (not `frame.Decode`, which returns
+`ErrBadVer` for `0x08`); it is specified once in the canonical
+[BRC-142 spec](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md#3a-brc-142-coalescing-bundle-frame-format)
+and the public
+[bsv-multicast/docs/brc-142-coalescing-frame.md](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-142-coalescing-frame.md)
+— not restated here.
+
+**Within-batch origin coalescing.** Coalescing is bounded to a single receive
+batch. As a worker dispatches a batch, eligible transactions are bucketed by
+their `(sender, group, subtree)` flow in a per-`Egress` `coalBuffer`
+(`forwarder/coalesce.go`); member payloads alias the worker's reused receive
+buffers. At batch end — immediately before `Egress.Flush` overwrites those
+buffers — `Forwarder.FlushCoalesced` packs each bucket into one or more owned
+bundle datagrams (up to `-coalesce-max-bytes` / `-coalesce-max-members`) and
+enqueues them. Each bundle draws its `HashKey`/`SeqNum` from the **same
+per-flow striped counter** (`nextSeq`) that stamps individual frames, so a
+flow's bundles interleave contiguously with any individual frames it also
+emits; a listener gap-tracks the `(group, subtree, HashKey)` flow uniformly
+regardless of frame version, and BRC-126 NACK/retry treats a bundle as one "fat
+frame."
+
+**Verbatim spine relay (origin-only rule).** Coalescing runs **only at the
+emitting origin** — the collapsed / ingress proxy that first sees the individual
+transactions. A regional spine that *relays* an already-coalesced bundle takes
+the `Forwarder.ProcessBundle` path: it does a cheap structural check (BSV magic +
+self-consistent `PayloadLen`), reads the destination `GroupIdx` from the bundle
+header (offset 56 — a bundle is bound to the single group it was built for, not
+re-derived from a member TxID), and re-emits the datagram **unchanged**. A bundle
+is never re-coalesced, re-stamped, or split in this proxy: one bundle in → one
+multicast datagram / one AF_XDP TX descriptor out. Decoalesce (split back to
+individual frames) and re-bucket (re-align to the receiver's shard generation)
+happen at the **delivery edge** (listener), not here.
+
 ## Multi-CPU Design
 
 Each UDP worker goroutine owns one ingress socket bound via `SO_REUSEPORT`
@@ -377,7 +416,10 @@ shard-proxy/
                      ProcessSubtreeData (BRC-132), ProcessAnchor (BRC-134),
                      BRC-130 fragmentation; per-worker Egress batcher with
                      sync.Pool fragment buffers (egress.go); opt-in
-                     BridgingEngine dual-emit for live resharding
+                     BridgingEngine dual-emit for live resharding;
+                     opt-in BRC-142 coalescing (coalesce.go): within-batch
+                     coalBuffer + FlushCoalesced origin packing, ProcessBundle
+                     verbatim spine relay
   worker/            per-CPU SO_REUSEPORT UDP ingress loop using recvmmsg
                      (ReadBatch) with frame-version dispatch for BRC-131/
                      BRC-132/BRC-134 (worker.go); TCP ingress listener with
@@ -393,6 +435,8 @@ Protocol primitives are provided by
 ```
 shard-common/
   frame/             BRC-12/BRC-124/BRC-128/BRC-131/BRC-132/BRC-134/BRC-135 wire format: Decode, Encode, constants
+  bundle/            BRC-142 coalescing bundle frame (FrameVer 0x08): Bundle
+                     Encode/Decode, Member, MemberOverhead, Coalescer/Decoalesce
   shard/             txid → group index → IPv6 multicast address derivation;
                      control group constants and GroupAddr
   seqhash/           XXH64 per-flow HashKey computation (senderIPv6 ∥ groupIdx ∥ subtreeID)
