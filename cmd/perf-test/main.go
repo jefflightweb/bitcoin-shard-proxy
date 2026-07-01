@@ -5,7 +5,7 @@
 //
 // Usage:
 //
-//	perf-test -proxy-addr [fd20::2]:8725 -metrics-url http://10.10.10.20:9100 \
+//	perf-test -proxy-addr [fd20::2]:8725 -metrics-url http://192.0.2.20:9100 \
 //	  -shard-bits 2 -pps 10000 -duration 5m -payload-min 256 -payload-max 512 \
 //	  -lxd -receivers recv1,recv2,recv3 -output report.md
 package main
@@ -66,7 +66,7 @@ type config struct {
 func parseFlags() *config {
 	c := &config{}
 	flag.StringVar(&c.ProxyAddr, "proxy-addr", "[::1]:8725", "proxy listen address (host:port)")
-	flag.StringVar(&c.MetricsURL, "metrics-url", "http://10.10.10.20:9100", "proxy metrics base URL")
+	flag.StringVar(&c.MetricsURL, "metrics-url", "http://192.0.2.20:9100", "proxy metrics base URL")
 	bits := flag.Uint("shard-bits", 2, "shard-bits the proxy is configured with")
 	flag.IntVar(&c.PPS, "pps", 10000, "target packets per second")
 	flag.DurationVar(&c.Duration, "duration", 5*time.Minute, "test duration")

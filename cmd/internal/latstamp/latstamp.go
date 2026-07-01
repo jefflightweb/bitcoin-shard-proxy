@@ -3,8 +3,8 @@
 // embedded at the head of an otherwise opaque BRC-124 payload. The frame
 // format and the datapath under test are unaware of it.
 //
-// The same layout is used by the lab SSM harness (ssm_tx.py --stamp) and the
-// host-pcap analyzer (1bsv-ops/environments/lab-spine-ssm/latency-pcap.py).
+// The same layout is used by the lab SSM harness (ssm_tx.py --stamp) and a
+// host-side pcap analyzer.
 // CLOCK_REALTIME makes stamps cross-host comparable only when clocks are
 // disciplined (chrony/NTP); single-clock pcap analysis ignores the field.
 package latstamp

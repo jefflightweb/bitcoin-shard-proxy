@@ -5,8 +5,8 @@
 //
 // One-way figures are only meaningful when sender and sink clocks are
 // disciplined (chrony/NTP) or share a host. On the VM lab the authoritative
-// timing is host-side pcap (latency-pcap.py); this tool is the deployment
-// probe and a join/count helper there. See 1bsv-ops/plans/latency-benchmark.md.
+// timing is host-side pcap; this tool is the deployment probe and a join/count
+// helper there.
 //
 // Usage:
 //
