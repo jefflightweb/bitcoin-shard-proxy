@@ -9,7 +9,7 @@ BRC-131/BRC-132/BRC-134), then retransmits the original bytes verbatim to all co
 egress interfaces.
 
 BRC wire formats live in
-[bsv-multicast/docs/](../../bsv-multicast/docs/).
+[bsv-multicast/docs/](https://github.com/lightwebinc/bsv-multicast/tree/main/docs).
 
 ```text
 sender  ──UDP/TCP──►  shard-proxy  ──UDP multicast──►  FF05::B:<shard>  (data plane, configurable scope)
@@ -50,8 +50,8 @@ for fabric prerequisites (PIM-SSM, MLDv2, raised `mld_max_msf`).
 ## Control Groups
 
 BRC-131 and BRC-132 frames are routed to fixed control-plane multicast groups rather than
-shard-derived data-plane groups. The reserved indices (top of the 16-bit space, above
-`shard-bits` maximum of 15) are defined in `shard-common/shard/control.go`:
+shard-derived data-plane groups. The reserved indices (top of the 16-bit space, far above
+the BRC-129 shard zone `0x0000`–`0x0FFF`) are defined in `shard-common/shard/control.go`:
 
 | Constant | Index | Canonical Address (group-id `0x000B`) | Purpose |
 |---|---|---|---|
@@ -63,8 +63,9 @@ shard-derived data-plane groups. The reserved indices (top of the 16-bit space, 
 
 Per BRC-129 §3, `GroupBlockBroadcast` uses **global scope (FF0E)** regardless of the data-plane scope, because block headers, coinbase, and anchor transactions must reach every subscriber across organisational boundaries.
 
-The `-shard-bits` limit of 15 ensures user shard indices (`0x0000`–`0x7FFF`) never overlap
-with control groups (`0xFFFA`–`0xFFFE`).
+Per BRC-129 zoning, shard group indices are bounded to `0x0000`–`0x0FFF` — `-shard-bits`
+is at most 12 for conformant deployments (the flag validator currently accepts up to 15
+for lab use) — so user shard indices never overlap the control groups (`0xFFFA`–`0xFFFE`).
 
 ## BRC-131 Block Control Frames (FrameVerV4)
 
@@ -158,7 +159,7 @@ self-consistent `PayloadLen`), reads the destination `GroupIdx` from the bundle
 header (offset 56 — a bundle is bound to the single group it was built for, not
 re-derived from a member TxID), and re-emits the datagram **unchanged**. A bundle
 is never re-coalesced, re-stamped, or split in this proxy: one bundle in → one
-multicast datagram / one AF_XDP TX descriptor out. Decoalesce (split back to
+multicast datagram out. Decoalesce (split back to
 individual frames) and re-bucket (re-align to the receiver's shard generation)
 happen at the **delivery edge** (listener), not here.
 

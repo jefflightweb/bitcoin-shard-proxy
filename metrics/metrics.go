@@ -141,7 +141,7 @@ type Recorder struct {
 	promTxIngressErrs *promclient.CounterVec
 
 	// Accepted-ingress volume by frame class and admission tier — labels:
-	// class, tier. Tracked (not billed) so the future ingress billing model has
+	// class, tier. Tracked for operator accounting so downstream tooling has
 	// data without re-instrumenting; miners emit block/coinbase/subtree, tx
 	// senders emit tx. Handles are pre-resolved (small fixed label set) so the
 	// admission hot path does one array index, no per-frame label lookup.
@@ -343,11 +343,11 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}, []string{"worker", "network_interface_name"})
 	r.promIngressBytes = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsp_ingress_class_bytes_total",
-		Help: "Accepted ingress bytes by frame class and admission tier (tracked, not billed)",
+		Help: "Accepted ingress bytes by frame class and admission tier (operator accounting)",
 	}, []string{"class", "tier"})
 	r.promIngressPackets = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsp_ingress_class_packets_total",
-		Help: "Accepted ingress frames by frame class and admission tier (tracked, not billed)",
+		Help: "Accepted ingress frames by frame class and admission tier (operator accounting)",
 	}, []string{"class", "tier"})
 	for c := IngressFrameClass(0); c < ingressClassCount; c++ {
 		for ti, tier := range []string{"privileged", "transaction"} {

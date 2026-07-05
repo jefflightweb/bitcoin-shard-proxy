@@ -128,7 +128,7 @@ type Config struct {
 	Coalesce           bool
 	CoalesceMaxBytes   int  // max bundle datagram size (0 ⇒ 1500, the Ethernet MTU baseline)
 	CoalesceMaxMembers int  // max members per bundle (0 ⇒ MTU-bound)
-	CoalesceCarryTxid  bool // include per-member TxID on the wire (dedup/billing) vs recompute
+	CoalesceCarryTxid  bool // include per-member TxID on the wire (dedup/accounting) vs recompute
 
 	// RecvBatch is the number of datagrams a worker requests per recvmmsg
 	// syscall (and matching default queue capacity for sendmmsg-style
@@ -256,7 +256,7 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.CoalesceMaxMembers, "coalesce-max-members", envInt("COALESCE_MAX_MEMBERS", 0),
 		"max member transactions per bundle (0 = MTU-bound)")
 	flag.BoolVar(&c.CoalesceCarryTxid, "coalesce-carry-txid", envBool("COALESCE_CARRY_TXID", false),
-		"carry per-member TxID in the bundle (dedup/billing) instead of recomputing on receipt")
+		"carry per-member TxID in the bundle (dedup/accounting) instead of recomputing on receipt")
 	flag.IntVar(&c.RecvBatch, "recv-batch", envInt("BSP_RECV_BATCH", 32),
 		"datagrams per recvmmsg syscall (1 = per-packet legacy path; 32 default)")
 	flag.IntVar(&c.RecvBufBytes, "recv-buf-bytes", envInt("BSP_RECV_BUF_BYTES", 0),

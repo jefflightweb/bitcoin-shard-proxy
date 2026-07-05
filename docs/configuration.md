@@ -19,7 +19,7 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-egress-port` | `EGRESS_PORT` | `9001` | Destination UDP port for multicast groups |
 | `-egress-hoplimit` | `EGRESS_HOPLIMIT` | `1` | IPv6 multicast hop limit (`IPV6_MULTICAST_HOPS`) written on egress. `1` = single L2 segment; raise above 1 for routed/tunneled mesh fabrics where the datagram must cross ip6gre / PIM hops |
 | `-egress-loop` | `EGRESS_MULTICAST_LOOP` | `false` | Enable `IPV6_MULTICAST_LOOP` on egress. Required on collapsed / mesh-router nodes so locally-originated multicast is picked up by the kernel MFC and forwarded to tunnel / consumer OIFs. Off for plain L2 egress |
-| `-shard-bits` | `SHARD_BITS` | `2` | Key bit width (1–15) |
+| `-shard-bits` | `SHARD_BITS` | `2` | Key bit width (1–12 per BRC-129) |
 | `-scope` | `MC_SCOPE` | `site` | Multicast scope: `link` \| `site` \| `org` \| `global` |
 | `-mc-group-id` | `MC_GROUP_ID` | `0x000B` | IANA group-id (bytes 12–13); default = IANA Bitcoin allocation `FF0X::B` |
 | `-source-mode` | `SOURCE_MODE` | `asm` | Multicast addressing model: `asm` (FF0x; default) or `ssm` (FF3x per RFC 4607). SSM derives the prefix via `shard.Prefix(SSM, scope)` → FF35 site / FF3E global; RFC 8815 deprecates ASM at global scope and is rejected. Requires PIM-SSM in the fabric. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm). |
@@ -39,10 +39,10 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-coalesce` | `COALESCE` | `false` | Opt-in BRC-142 origin-side frame coalescing (pack many small same-`(group, subtree)` tx per datagram to cut egress pps). See [BRC-142 Coalescing](#brc-142-coalescing-origin-side) |
 | `-coalesce-max-bytes` | `COALESCE_MAX_BYTES` | `1500` | Max coalesced bundle datagram size in bytes (1500 = Ethernet MTU baseline; 9000 for jumbo on a controlled underlay) |
 | `-coalesce-max-members` | `COALESCE_MAX_MEMBERS` | `0` | Max member transactions per bundle (`0` = MTU-bound only) |
-| `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | Carry each member's 32-byte TxID on the wire (for downstream dedup / billing) instead of recomputing it on receipt |
+| `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | Carry each member's 32-byte TxID on the wire (for downstream dedup / operator accounting) instead of recomputing it on receipt |
 | `-recv-batch` | `BSP_RECV_BATCH` | `32` | Datagrams per `recvmmsg` syscall (1 = per-packet legacy path) |
 | `-recv-buf-bytes` | `BSP_RECV_BUF_BYTES` | `0` | Per-worker `SO_RCVBUF` in bytes (`0` = system default; capped by `net.core.rmem_max`) |
-| `-ingress-dedup` | `INGRESS_DEDUP` | `true` | Enable ingress TxID dedup. `false` bypasses the dedup gate entirely — only sound for single-proxy ingest topologies. See [Ingress TxID Deduplication](#ingress-txid-deduplication) |
+| `-ingress-dedup` | `INGRESS_DEDUP` | `true` | Enable ingress TxID dedup. `false` bypasses the dedup gate entirely — only sound for single-proxy ingest topologies. See [Ingress TxID Deduplication](#ingress-txid-dedup) |
 | `-pprof` | `BSP_PPROF` | `false` | Mount `net/http/pprof` at `/debug/pprof/*` on the metrics server (profiling only) |
 
 ---
@@ -113,8 +113,8 @@ Opening a miner port is the proxy's "accept block/coinbase/subtree data?"
 switch — leave both at `0` and the proxy ingests transactions only. Expose the
 miner port to miner-tier peers alone, over their tunnels and/or with a firewall
 source restriction; the user port stays open to all consumers as today. The
-broker drives which peers reach the miner port; "miners who are not customers"
-are added to the miner source set out of band.
+operator's control plane / firewall policy decides which peers may reach the
+miner port.
 
 ```
 shard-proxy \
@@ -181,8 +181,11 @@ multicast group index. The total number of groups is 2^N.
 | 1 | 2 | Minimal / testing |
 | 2 | 4 | Default |
 | 8 | 256 | Medium deployments |
-| 16 | 65 536 | Large deployments |
-| 24 | 16 777 216 | Maximum |
+| 12 | 4 096 | Maximum (BRC-129 bound) |
+
+BRC-129 zoning bounds shard group indices to `0x0000`–`0x0FFF`, so conformant
+deployments use at most 12 bits. (The flag validator currently accepts up to
+15 for lab use.)
 
 Increasing bits by 1 splits every existing group into two child groups
 (consistent hashing). Subscribers need only join additional groups.
@@ -204,7 +207,7 @@ any modification.
 For **BRC-134 anchor frames** (`FrameVerV6`), the proxy forwards to `GroupBlockBroadcast`
 (`FF0X::B:FFFE`). Anchor frames use a virtual `groupIdx` of `0xFFF9` for HashKey derivation
 so anchors are accounted as an independent flow (label `brc134`) distinct from BRC-131 block
-control. See [bsv-multicast/docs/brc-134-anchor-transactions.md](../../../bsv-multicast/docs/brc-134-anchor-transactions.md).
+control. See [bsv-multicast/docs/brc-134-anchor-transactions.md](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-134-anchor-transactions.md).
 
 ---
 
@@ -232,7 +235,7 @@ regional spine that *relays* an already-coalesced bundle forwards it
 **verbatim**: it is not re-coalesced, not re-stamped, and not split. A bundle is
 a complete, self-describing multicast frame bound to the single group it was
 built for, so a relay re-emits it unchanged (one bundle in → one multicast
-datagram / one AF_XDP TX descriptor out). Never enable origin coalescing on a
+datagram out). Never enable origin coalescing on a
 node whose role is to relay bundles.
 
 | Flag | Env | Default | Notes |
@@ -240,7 +243,7 @@ node whose role is to relay bundles.
 | `-coalesce` | `COALESCE` | `false` | Master switch. Off = every transaction egresses as its own frame (legacy) |
 | `-coalesce-max-bytes` | `COALESCE_MAX_BYTES` | `1500` | Bundle datagram cap. `1500` = public-internet Ethernet MTU (realistic baseline); `9000` for jumbo on a controlled underlay. `0` also means 1500 |
 | `-coalesce-max-members` | `COALESCE_MAX_MEMBERS` | `0` | Hard cap on member transactions per bundle. `0` = bounded only by `-coalesce-max-bytes` (capped by the wire `TxCount` uint16) |
-| `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | When set, each member carries its 32-byte TxID on the wire (for downstream dedup / billing) — an all-or-none flag across the bundle. When unset the receiver recomputes TxIDs, saving 32 B/member |
+| `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | When set, each member carries its 32-byte TxID on the wire (for downstream dedup / operator accounting) — an all-or-none flag across the bundle. When unset the receiver recomputes TxIDs, saving 32 B/member |
 
 ```bash
 # origin edge: coalesce small tx to cut egress pps, Ethernet-MTU bundles
@@ -248,7 +251,7 @@ shard-proxy \
   -iface eth0 \
   -coalesce \
   -coalesce-max-bytes  1500 \
-  -coalesce-carry-txid           # carry TxIDs for billing/dedup downstream
+  -coalesce-carry-txid           # carry TxIDs for accounting/dedup downstream
 ```
 
 Wire format (bundle header + member section), the `Coalescer`/`Decoalesce`/

@@ -47,18 +47,22 @@ sender  ──UDP/TCP──►  shard-proxy  ──UDP multicast──►  FF05:
 ## Build
 
 ```bash
-make            # builds shard-proxy, send-test-frames, recv-test-frames
+make            # builds shard-proxy, send-test-frames, recv-test-frames, perf-test
 make test       # runs unit tests
 make test-e2e   # end-to-end test (builds all binaries, runs test/run-e2e.sh)
 make clean      # removes built binaries
 ```
+
+`cmd/latency-sink` (a multicast receiver that reports one-way latency
+percentiles from `perf-test -latency-stamp` senders) is built directly with
+`go build ./cmd/latency-sink`.
 
 ## Run
 
 ```bash
 ./shard-proxy \
   -iface            eth0 \
-  -shard-bits       16   \
+  -shard-bits       8    \
   -scope            site \
   -udp-listen-port  8725 \
   -egress-port      9001
@@ -154,7 +158,7 @@ A Kubernetes Helm chart is published from a dedicated chart repository:
   helm repo add bsp https://lightwebinc.github.io/shard-proxy-helm
   helm install proxy bsp/shard-proxy
   ```
-- OCI: `helm install proxy oci://ghcr.io/lightwebinc/charts/shard-proxy --version 0.1.0`
+- OCI: `helm install proxy oci://ghcr.io/lightwebinc/charts/shard-proxy --version 0.4.0`
 
 Every flag accepted by this binary is exposed under `.config` in the chart's `values.yaml`. See the chart README for the full reference and `values.schema.json` for validation rules.
 

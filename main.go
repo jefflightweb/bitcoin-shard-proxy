@@ -17,10 +17,11 @@
 // full mapping. The most important parameters:
 //
 //   - -shard-bits (SHARD_BITS): controls how many bits of the txid prefix
-//     are used as the multicast group key. Range 1–15.
+//     are used as the multicast group key. BRC-129 zoning bounds shard group
+//     indices to 0x0000–0x0FFF, so conformant deployments use at most 12
+//     (the validator accepts 1–15 for lab use).
 //     8  →   256 groups (fits any managed switch)
-//     12 →  4096 groups
-//     15 → 32768 groups (maximum; top of 16-bit space reserved for control)
+//     12 →  4096 groups (BRC-129 maximum)
 //
 //   - -mc-group-id (MC_GROUP_ID): IANA group-id occupying bytes 12–13 of
 //     the address. Default 0x000B (IANA Bitcoin allocation "FF0X::B").
