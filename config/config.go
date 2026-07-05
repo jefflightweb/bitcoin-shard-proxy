@@ -17,7 +17,7 @@
 //	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
 //	-egress-port          EGRESS_PORT           9001      Destination port on groups
 //	-egress-hoplimit      EGRESS_HOPLIMIT       1         IPV6_MULTICAST_HOPS (raise for routed/tunneled mesh)
-//	-shard-bits           SHARD_BITS            2         Key bit width (1–15)
+//	-shard-bits           SHARD_BITS            2         Key bit width (1–12)
 //	-scope                MC_SCOPE              site      Multicast scope
 //	-mc-group-id          MC_GROUP_ID           0x000B    IANA group-id (default Bitcoin = 0x000B)
 //	-workers              NUM_WORKERS           NumCPU    Worker goroutine count
@@ -100,7 +100,7 @@ type Config struct {
 	MinPoWBits      uint32
 
 	// Sharding
-	ShardBits   uint   // Number of txid prefix bits used as the group key (1–15)
+	ShardBits   uint   // Number of txid prefix bits used as the group key (1–12)
 	NumGroups   uint32 // Derived: 1 << ShardBits — total distinct multicast groups
 	MCScope     string // "site" | "global" — see shard.Scope. Legacy values "link"/"org" are still accepted in ASM mode.
 	MCPrefix    uint16 // Derived from (SourceMode, MCScope) — upper 16 bits of the IPv6 group address
@@ -294,7 +294,7 @@ func Load() (*Config, error) {
 		"OTLP push interval")
 
 	bits := flag.Uint("shard-bits", uint(envInt("SHARD_BITS", 2)),
-		"txid prefix bit width used as the shard key (1–15)")
+		"txid prefix bit width used as the shard key (1–12)")
 
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
 		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
@@ -315,10 +315,10 @@ func Load() (*Config, error) {
 
 	flag.Parse()
 
-	// Validate shard bit width. Top of the 16-bit shard space is reserved for
-	// control-plane groups (0xFFFC–0xFFFE), so practical bits is bounded at 15.
-	if *bits < 1 || *bits > 15 {
-		return nil, fmt.Errorf("shard-bits must be in [1, 15], got %d", *bits)
+	// Validate shard bit width. BRC-129 zones the 16-bit shard space: shard
+	// group indices are 0x0000–0x0FFF, so bits is bounded at 12.
+	if *bits < 1 || *bits > 12 {
+		return nil, fmt.Errorf("shard-bits must be in [1, 12], got %d", *bits)
 	}
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits

@@ -18,8 +18,7 @@
 //
 //   - -shard-bits (SHARD_BITS): controls how many bits of the txid prefix
 //     are used as the multicast group key. BRC-129 zoning bounds shard group
-//     indices to 0x0000–0x0FFF, so conformant deployments use at most 12
-//     (the validator accepts 1–15 for lab use).
+//     indices to 0x0000–0x0FFF; the validator enforces 1–12.
 //     8  →   256 groups (fits any managed switch)
 //     12 →  4096 groups (BRC-129 maximum)
 //
