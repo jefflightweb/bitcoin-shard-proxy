@@ -243,8 +243,11 @@ Offset  Size  Align  Field            Value / notes
     44     *   —     BSV tx payload   raw serialised transaction bytes
 ```
 
-BRC-12 frames carry no `HashKey`, `SeqNum`, or `SubtreeID` fields.
-The proxy accepts them and forwards the original bytes unchanged.
+BRC-12 frames carry no `HashKey`, `SeqNum`, or `SubtreeID` fields. By default the
+proxy accepts them and forwards the original bytes unchanged. Under `-require-ef`
+(EF-native ingress) legacy BRC-12 is **rejected** — it carries a raw transaction
+and the fabric is Extended-Format-only. See
+[Transaction ingress: framed, bare, and EF-native](#transaction-ingress-framed-bare-and-ef-native).
 
 ### BRC-131 (FrameVerV4 — 92-byte header, block control)
 
@@ -305,6 +308,51 @@ Offset  Size  Align  Field          Value / notes
     88     4   —     PayloadLen     uint32 BE
     92     *   —     Payload        Raw serialised anchor transaction
 ```
+
+## Transaction ingress: framed, bare, and EF-native
+
+The transaction ingress port (`-udp-listen-port`, default 8725) accepts a
+transaction in two shapes, distinguished by the first four bytes:
+
+- **Framed** — a BRC-124/BRC-128 (or legacy BRC-12) frame, which begins with the
+  BSV network magic `0xE3E1F3E8`. Decoded, dedup-claimed by TxID, stamped, and
+  forwarded — the relay hot path.
+- **Bare** — a header-stripped transaction (no frame). The magic is absent, so
+  `DispatchClass` routes it to the bare path, wraps it into an unstamped
+  BRC-124/128 frame, and drives it through the same forward path. One
+  transaction per datagram. This retires the need for a separate raw-tx port:
+  submitters send bare transactions to the same 8725 as framed traffic.
+
+The magic pre-check is a single `uint32` compare in the same cache line as the
+frame-version byte the router already reads, so the framed relay hot path is
+byte-identical; the bare branch is cold (submissions only).
+
+### EF-native ingress (`-require-ef`)
+
+Teranode requires **Extended Format** (EF — the BRC-30 marker
+`00 00 00 00 00 EF` at payload bytes 4–9): a raw transaction (BRC-12) omits each
+input's funding value and locking script, which the stateless fabric cannot
+supply (extension needs a UTXO lookup — a wallet/submitter concern). With
+`-require-ef` set the ingress is EF-native: a **submission** must be EF, or it is
+rejected —
+
+- a legacy BRC-12 (44-byte, FrameVerV1) frame,
+- an unstamped raw BRC-124 (92-byte, FrameVerV2 without the marker) frame, and
+- a bare non-EF transaction
+
+are dropped (`bsp` packet-dropped counters `reason=ingress_not_ef` /
+`bare_tx_not_ef`). **Relayed frames are exempt** — a frame that is already
+stamped (`SeqNum != 0`) was validated at its ingress, so the relay/spine hot
+path is untouched, and when `-require-ef` is off (default) both raw and EF are
+accepted and forwarded verbatim (legacy contract preserved). The `requireEF`
+guard short-circuits to a single predicted branch when off, so there is no
+measurable hot-path cost either way (`forwarder` micro-benchmarks: relay and
+submission both within run-to-run noise of baseline).
+
+Because a raw transaction and its extended form share the **same TxID** (the ID
+is over the standard serialisation), a raw→EF "re-transmit" service on the fabric
+would collide with ingress TxID dedup; EF must therefore be produced at the
+wallet, at signing time, where the input UTXOs are already in hand.
 
 ## Hot Path
 

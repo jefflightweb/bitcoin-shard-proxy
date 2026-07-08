@@ -8,9 +8,10 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
 | `-listen` | `LISTEN_ADDR` | `[::]` | Ingress bind address (without port) |
-| `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP listen port for incoming BSV transaction frames (BRC-12, BRC-124, or BRC-128) |
+| `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP transaction ingress — **framed** (BRC-124/128/legacy BRC-12) or **bare** header-stripped transactions, auto-detected by the leading network magic (one tx per datagram). See [Transaction ingress](architecture.md#transaction-ingress-framed-bare-and-ef-native) |
 | `-tcp-listen-port` | `TCP_LISTEN_PORT` | `0` | TCP ingress port for reliable delivery (0 = disabled) |
 | `-require-block-pow` | `REQUIRE_BLOCK_POW` | `false` | Gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header. Permissionless (validates work, not identity). See [Block-announce proof-of-work](#block-announce-proof-of-work) |
+| `-require-ef` | `REQUIRE_EF` | `false` | **EF-native ingress**: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted. Relayed (already-stamped) frames are exempt, so the relay hot path is untouched. See [EF-native ingress](architecture.md#ef-native-ingress--require-ef) |
 | `-min-pow-bits` | `MIN_POW_BITS` | `0` | PoW difficulty floor in Bitcoin compact `nBits` form (e.g. `0x1d00ffff`); `0` = header self-consistency only (weak) |
 | `-iface` | `MULTICAST_IF` | `eth0` | Comma-separated NIC names for multicast egress |
 | `-egress-port` | `EGRESS_PORT` | `9001` | Destination UDP port for multicast groups |

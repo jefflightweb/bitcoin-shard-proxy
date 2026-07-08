@@ -56,6 +56,7 @@ import (
 
 	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/pow"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
@@ -169,6 +170,14 @@ type Forwarder struct {
 	requireBlockPoW bool
 	powFloor        *big.Int
 
+	// requireEF makes the ingress EF-native: a transaction submission (an
+	// unstamped BRC-124 frame or a bare tx) must be BRC-30 Extended Format;
+	// legacy BRC-12 (V1) frames and raw BRC-124 submissions are rejected. Off by
+	// default (accepts raw + EF). Relayed (already-stamped) frames are exempt —
+	// they were validated at their ingress — so the relay hot path is untouched.
+	// See docs/architecture.md § Transaction ingress (framed, bare, EF-native).
+	requireEF bool
+
 	// groupAddrs caches the multicast destination address by group index. The
 	// address is a pure function of (mcPrefix, mcGroupID, idx, egressPort) —
 	// invariant across resharding/bridging, which change the index a txid maps
@@ -279,6 +288,12 @@ func (fw *Forwarder) SetBlockPoW(require bool, floorBits uint32) {
 		fw.powFloor = nil
 	}
 }
+
+// SetRequireEF enables EF-native ingress: transaction submissions must be BRC-30
+// Extended Format; raw BRC-12 (V1) and raw BRC-124 (V2 without the marker)
+// submissions are rejected. Off by default. Relayed frames (already stamped) are
+// unaffected. Must be called before any worker starts.
+func (fw *Forwarder) SetRequireEF(require bool) { fw.requireEF = require }
 
 // SetCoalesce enables BRC-142 within-batch frame coalescing. When enabled,
 // eligible BRC-124/128 transactions are buffered per (sender, group, subtree)
@@ -472,6 +487,15 @@ func (fw *Forwarder) Dispatch(egr *Egress, raw []byte, src net.Addr, workerID in
 // until egr.Flush returns.
 func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, workerID int, class IngressClass) {
 	n := len(raw)
+	// Bare (header-stripped) transaction detection. A multicast frame begins with
+	// the BSV network magic; anything else on this port is a bare transaction
+	// submitted without a frame. The 4-byte magic read is in the same cache line
+	// as the raw[6] version byte the switch below already reads, so the framed
+	// relay hot path is byte-identical; the bare branch is cold (submissions only).
+	if n < 4 || binary.BigEndian.Uint32(raw[0:4]) != frame.MagicBSV {
+		fw.dispatchBareTx(egr, raw, src, workerID)
+		return
+	}
 	privileged := class == IngressPrivileged
 	switch {
 	case n > 6 && raw[6] == frame.FrameVerV4:
@@ -518,6 +542,47 @@ func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, worker
 	}
 }
 
+// dispatchBareTx admits a header-stripped transaction submitted without a
+// multicast frame (the push-ingest submission path). It is EF-only: a BRC-30
+// Extended Format transaction, one per datagram. BRC-12 raw is rejected — the
+// fabric is EF-native (Teranode requires Extended Format; extending a raw tx
+// needs a UTXO lookup, a wallet/submitter concern, not a fabric one). A bare tx
+// is inherently transaction-class, so it composes with the miner-tier gate for
+// free — no privileged (block/subtree/coinbase) frame can be expressed here.
+func (fw *Forwarder) dispatchBareTx(egr *Egress, tx []byte, src net.Addr, workerID int) {
+	iface := ""
+	if egr != nil && len(egr.targets) > 0 {
+		iface = egr.targets[0].Iface.Name
+	}
+	sz, err := objfmt.TxSize(tx)
+	if err != nil || sz != len(tx) {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(iface, workerID, "bare_tx_malformed")
+		}
+		return
+	}
+	if fw.requireEF && !objfmt.IsEF(tx) {
+		// EF-native ingress: BRC-12 raw is rejected. The submitter must send
+		// Extended Format (BRC-30); a raw tx cannot be delivered to a Teranode
+		// consumer and extension is not a fabric-side operation.
+		if fw.rec != nil {
+			fw.rec.PacketDropped(iface, workerID, "bare_tx_not_ef")
+		}
+		return
+	}
+	framed, err := objfmt.MulticastBytes(objfmt.ClassTx, tx)
+	if err != nil {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(iface, workerID, "bare_tx_reframe")
+		}
+		return
+	}
+	if fw.rec != nil {
+		fw.rec.IngressMetered(metrics.IngressClassTx, false, len(tx))
+	}
+	fw.Process(egr, framed, src, workerID)
+}
+
 // rejectPrivileged drops a privileged control-plane frame received on a
 // transaction-only ingress socket and records it under the wire frame-type
 // label (brc131 announce / brc133 coinbase / brc132 subtree data).
@@ -557,6 +622,20 @@ func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int
 		fw.log.Debug("frame decode error", "err", err, "len", len(raw))
 		if fw.rec != nil && egr != nil && len(egr.targets) > 0 {
 			fw.rec.PacketDropped(egr.targets[0].Iface.Name, workerID, "decode_error")
+		}
+		return
+	}
+
+	// EF-native ingress (opt-in). A submission must be Extended Format: a legacy
+	// BRC-12 (V1) frame, or an unstamped raw BRC-124 (V2 without the marker), is
+	// rejected. Relayed frames (already stamped, SeqNum != 0) are exempt — they
+	// were validated at their ingress — so the relay hot path is unchanged; and
+	// when requireEF is off the whole check short-circuits to a single predicted
+	// branch. SeqNum is read for the stamp decision anyway; the marker compare
+	// runs only for an unstamped transaction.
+	if fw.requireEF && (f.Version == frame.FrameVerV1 || (f.SeqNum == 0 && !objfmt.IsEF(f.Payload))) {
+		if fw.rec != nil && egr != nil && len(egr.targets) > 0 {
+			fw.rec.PacketDropped(egr.targets[0].Iface.Name, workerID, "ingress_not_ef")
 		}
 		return
 	}

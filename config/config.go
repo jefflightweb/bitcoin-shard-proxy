@@ -95,6 +95,11 @@ type Config struct {
 	RequireBlockPoW bool
 	MinPoWBits      uint32
 
+	// RequireEF makes the ingress EF-native: transaction submissions must be
+	// BRC-30 Extended Format; raw BRC-12/BRC-124 submissions are rejected. Off by
+	// default (accepts raw + EF). Relayed (already-stamped) frames are unaffected.
+	RequireEF bool
+
 	// Sharding
 	ShardBits   uint   // Number of txid prefix bits used as the group key (1–12)
 	NumGroups   uint32 // Derived: 1 << ShardBits — total distinct multicast groups
@@ -209,6 +214,8 @@ func Load() (*Config, error) {
 		"TCP port accepting BRC-144 block push frames (privileged; bind tunnel-side; standard 8727; 0 = disabled)")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
 		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
+	flag.BoolVar(&c.RequireEF, "require-ef", envBool("REQUIRE_EF", false),
+		"EF-native ingress: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted (relayed frames unaffected)")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
 		"difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
 	ifaceFlag := flag.String("iface", envStr("MULTICAST_IF", "eth0"),

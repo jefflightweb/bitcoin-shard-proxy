@@ -178,6 +178,10 @@ func main() {
 	fwd := forwarder.New(engine, cfg.MCPrefix, cfg.MCGroupID, cfg.EgressPort, cfg.Debug, rec)
 	fwd.SetEgressHopLimit(cfg.EgressHopLimit)
 	fwd.SetEgressLoop(cfg.EgressLoop)
+	fwd.SetRequireEF(cfg.RequireEF)
+	if cfg.RequireEF {
+		slog.Info("EF-native ingress enabled: raw BRC-12/BRC-124 transaction submissions rejected")
+	}
 	if cfg.RequireBlockPoW {
 		fwd.SetBlockPoW(true, cfg.MinPoWBits)
 		slog.Info("block-announce proof-of-work gate enabled", "min_pow_bits", fmt.Sprintf("0x%08x", cfg.MinPoWBits))
