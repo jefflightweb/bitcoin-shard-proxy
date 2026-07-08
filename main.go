@@ -63,6 +63,7 @@ import (
 	"github.com/lightwebinc/shard-common/hostinfo"
 	"github.com/lightwebinc/shard-common/logging"
 	commanifest "github.com/lightwebinc/shard-common/manifest"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/shard"
 	"github.com/lightwebinc/shard-common/tracing"
 	"github.com/lightwebinc/shard-common/txidset"
@@ -165,9 +166,6 @@ func main() {
 		"scope", cfg.MCScope,
 		"udp_listen_port", cfg.UDPListenPort,
 		"tcp_listen_port", cfg.TCPListenPort,
-		"miner_udp_listen_port", cfg.MinerUDPListenPort,
-		"miner_tcp_listen_port", cfg.MinerTCPListenPort,
-		"tx_accept_privileged", cfg.TxAcceptPrivileged,
 		"egress_port", cfg.EgressPort,
 		"ifaces", cfg.EgressIfaces,
 		"debug", cfg.Debug,
@@ -259,13 +257,12 @@ func main() {
 	// Start the metrics HTTP server (blocks on done; shuts down gracefully).
 	go rec.Serve(cfg.MetricsAddr, cfg.PprofEnabled, done)
 
-	// User/consumer ingress: transaction-only unless -tx-accept-privileged.
-	// Privileged block/coinbase/subtree-data frames are dropped here and may
-	// only enter through the miner ingress (below).
+	// User/consumer ingress is transaction-only. Privileged block/coinbase/
+	// subtree-data frames are dropped here; the miner multicast port is
+	// deprecated (2026-07-07). Blocks/subtrees enter only as BRC-144/BRC-143
+	// push frames on the commercial proxy's tunnel-bound ports, reframed to the
+	// fabric — never accepted as multicast frames from a submitter.
 	userClass := forwarder.IngressTransaction
-	if cfg.TxAcceptPrivileged {
-		userClass = forwarder.IngressPrivileged
-	}
 	for i := range cfg.NumWorkers {
 		w := worker.New(i, fwd, ifaces, rec)
 		w.SetRecvBatch(cfg.RecvBatch)
@@ -278,29 +275,6 @@ func main() {
 				slog.Error("worker exited with error", "worker", i, "err", err)
 			}
 		}()
-	}
-
-	// Miner ingress (privileged): a separate UDP socket pool that accepts the
-	// miner-only control-plane frames (BRC-131 block, BRC-133 coinbase,
-	// BRC-132 subtree data). Operators expose this port to miner-tier peers
-	// only (over their tunnels / via firewall source restriction). Disabled
-	// when -miner-listen-port is 0.
-	if cfg.MinerUDPListenPort > 0 {
-		for i := range cfg.NumWorkers {
-			id := cfg.NumWorkers + i // distinct log ids from the user pool
-			w := worker.New(id, fwd, ifaces, rec)
-			w.SetRecvBatch(cfg.RecvBatch)
-			w.SetRecvBufBytes(cfg.RecvBufBytes)
-			w.SetIngressClass(forwarder.IngressPrivileged)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := w.Run(cfg.ListenAddr, cfg.MinerUDPListenPort, done); err != nil {
-					slog.Error("miner worker exited with error", "worker", id, "err", err)
-				}
-			}()
-		}
-		slog.Info("miner ingress enabled (privileged frames)", "udp_listen_port", cfg.MinerUDPListenPort)
 	}
 
 	// Start TCP ingress if configured. Mark it as a /readyz prerequisite
@@ -321,19 +295,31 @@ func main() {
 		}()
 	}
 
-	// Miner TCP ingress (privileged), mirroring the miner UDP path for
-	// reliable delivery of large block/subtree payloads.
-	if cfg.MinerTCPListenPort > 0 {
-		minerTCP := worker.NewTCPIngress(fwd, ifaces, rec)
-		minerTCP.SetIngressClass(forwarder.IngressPrivileged)
+	// Push-frame ingest lanes (replaces the deprecated miner multicast port).
+	// Each is a dedicated single-class TCP port carrying header-stripped push
+	// objects, reframed to the fabric: subtree → BRC-132, block → BRC-131
+	// carrying the BRC-144 body verbatim. Privileged — bind tunnel-side.
+	if cfg.SubtreeListenPort > 0 {
+		oi := worker.NewObjectIngress(fwd, ifaces, rec, objfmt.ClassSubtree)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := minerTCP.Run(cfg.ListenAddr, cfg.MinerTCPListenPort, done); err != nil {
-				slog.Error("miner TCP ingress exited with error", "err", err)
+			if err := oi.Run(cfg.ListenAddr, cfg.SubtreeListenPort, done); err != nil {
+				slog.Error("subtree ingress exited with error", "err", err)
 			}
 		}()
-		slog.Info("miner TCP ingress enabled (privileged frames)", "tcp_listen_port", cfg.MinerTCPListenPort)
+		slog.Info("subtree push ingress enabled (BRC-143 → BRC-132)", "listen_port", cfg.SubtreeListenPort)
+	}
+	if cfg.BlockListenPort > 0 {
+		oi := worker.NewObjectIngress(fwd, ifaces, rec, objfmt.ClassBlock)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := oi.Run(cfg.ListenAddr, cfg.BlockListenPort, done); err != nil {
+				slog.Error("block ingress exited with error", "err", err)
+			}
+		}()
+		slog.Info("block push ingress enabled (BRC-144 → BRC-131 body-verbatim)", "listen_port", cfg.BlockListenPort)
 	}
 
 	// ── BRC-139 manifest consumer (auto-shard-config) ────────────────────

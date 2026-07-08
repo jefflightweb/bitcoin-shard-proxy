@@ -77,16 +77,13 @@ With TCP ingress enabled:
   -tcp-listen-port  9100
 ```
 
-With a miner ingress for privileged block/coinbase/subtree-data frames (the
-user port 8725 stays transaction-only; expose 9000 to miner-tier peers only —
-see [Miner-tier ingress gate](docs/configuration.md#miner-tier-ingress-gate)):
-
-```bash
-./shard-proxy \
-  -iface            eth0 \
-  -udp-listen-port  8725 \   # consumers: transactions only
-  -miner-listen-port 9000    # miners: privileged frames, tunnel-only
-```
+Ingress is **transaction-only** at the component boundary: port 8725 accepts
+BRC-12/124/128 transactions (an anchor is an ordinary transaction). The old
+privileged **miner multicast port was deprecated (2026-07-07)** — blocks and
+subtrees are no longer submitted as multicast frames. They enter only as
+BRC-144 (block) / BRC-143 (subtree) push frames on the commercial proxy's
+tunnel-bound ports; multicast is fabric-internal transport. See the
+[design direction](https://github.com/lightwebinc/bsv-multicast/blob/main/multicast-skills/architecture.md).
 
 With Source-Specific Multicast (RFC 4607) — see [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm):
 

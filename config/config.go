@@ -9,9 +9,8 @@
 //	-listen               LISTEN_ADDR           [::]      Ingress bind address
 //	-udp-listen-port      UDP_LISTEN_PORT       8725      UDP listen port
 //	-tcp-listen-port      TCP_LISTEN_PORT       0         TCP ingress port (0 = disabled)
-//	-miner-listen-port    MINER_LISTEN_PORT     0         UDP miner ingress for privileged frames (0 = disabled)
-//	-miner-tcp-listen-port MINER_TCP_LISTEN_PORT 0        TCP miner ingress for privileged frames (0 = disabled)
-//	-tx-accept-privileged TX_ACCEPT_PRIVILEGED  false     User ingress also accepts privileged frames (legacy)
+//	-subtree-listen-port  SUBTREE_LISTEN_PORT   0         TCP BRC-143 subtree push ingest (standard 8726; tunnel-side; 0 = disabled)
+//	-block-listen-port    BLOCK_LISTEN_PORT     0         TCP BRC-144 block push ingest (standard 8727; tunnel-side; 0 = disabled)
 //	-require-block-pow    REQUIRE_BLOCK_POW     false     Gate BRC-131 block announces on header proof-of-work
 //	-min-pow-bits         MIN_POW_BITS          0         PoW difficulty floor (compact nBits; 0 = self-consistency only)
 //	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
@@ -74,23 +73,20 @@ type Config struct {
 	UDPListenPort int    // UDP port to receive BSV BRC-124/BRC-128 transaction frames
 	TCPListenPort int    // TCP ingress port; 0 = disabled
 
-	// Miner-tier ingress gate.
-	//
-	// The user/consumer ingress (UDPListenPort / TCPListenPort, default
-	// 8725) is transaction-only unless TxAcceptPrivileged is set: BRC-131
-	// block announce, BRC-133 coinbase, and BRC-132 subtree data frames are
-	// dropped there. Those privileged control-plane frames may only enter
-	// through the miner ingress sockets below, which an operator exposes to
-	// miner-tier peers alone (over their tunnels / via firewall). A proxy
-	// that should not accept block/coinbase/subtree data simply leaves both
-	// miner ports at 0.
-	MinerUDPListenPort int      // UDP miner ingress port (privileged frames); 0 = disabled
-	MinerTCPListenPort int      // TCP miner ingress port (privileged frames); 0 = disabled
-	TxAcceptPrivileged bool     // when true the user ingress also accepts privileged frames (legacy single-port behaviour)
-	EgressIfaces       []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
-	EgressPort         int      // Destination UDP port written into outgoing multicast datagrams
-	EgressHopLimit     int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
-	EgressLoop         bool     // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast is MFC-forwarded to tunnel/consumer OIFs
+	// Push-frame ingest (replaces the deprecated miner multicast port).
+	// Blocks and subtrees enter as header-stripped BRC-144 / BRC-143 push
+	// frames on dedicated single-class TCP ports, reframed to the fabric
+	// internally (subtree → BRC-132, block → BRC-131 carrying the BRC-144 body
+	// verbatim). These ports are privileged and MUST be bound tunnel-side /
+	// firewalled to miner-tier peers — only the transaction port (8725) is
+	// public. Standard numbers: 8726 subtree, 8727 block. 0 = disabled.
+	SubtreeListenPort int
+	BlockListenPort   int
+
+	EgressIfaces   []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
+	EgressPort     int      // Destination UDP port written into outgoing multicast datagrams
+	EgressHopLimit int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
+	EgressLoop     bool     // IPV6_MULTICAST_LOOP for egress; required on collapsed/mesh router nodes so locally-originated multicast is MFC-forwarded to tunnel/consumer OIFs
 
 	// Proof-of-work gate for BRC-131 block announces. Permissionless: validates
 	// the in-frame header carries real work rather than authorizing the emitter.
@@ -207,12 +203,10 @@ func Load() (*Config, error) {
 		"UDP listen port for incoming BSV BRC-124/BRC-128 transaction frames")
 	flag.IntVar(&c.TCPListenPort, "tcp-listen-port", envInt("TCP_LISTEN_PORT", 0),
 		"TCP ingress port for reliable frame delivery (0 = disabled)")
-	flag.IntVar(&c.MinerUDPListenPort, "miner-listen-port", envInt("MINER_LISTEN_PORT", 0),
-		"UDP miner ingress port accepting privileged BRC-131/133/132 frames; expose only to miner-tier peers (0 = disabled)")
-	flag.IntVar(&c.MinerTCPListenPort, "miner-tcp-listen-port", envInt("MINER_TCP_LISTEN_PORT", 0),
-		"TCP miner ingress port accepting privileged BRC-131/133/132 frames (0 = disabled)")
-	flag.BoolVar(&c.TxAcceptPrivileged, "tx-accept-privileged", envBool("TX_ACCEPT_PRIVILEGED", false),
-		"allow the user transaction ingress to also accept privileged block/coinbase/subtree-data frames (legacy single-port behaviour; default false = transaction-only)")
+	flag.IntVar(&c.SubtreeListenPort, "subtree-listen-port", envInt("SUBTREE_LISTEN_PORT", 0),
+		"TCP port accepting BRC-143 subtree push frames (privileged; bind tunnel-side; standard 8726; 0 = disabled)")
+	flag.IntVar(&c.BlockListenPort, "block-listen-port", envInt("BLOCK_LISTEN_PORT", 0),
+		"TCP port accepting BRC-144 block push frames (privileged; bind tunnel-side; standard 8727; 0 = disabled)")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
 		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
@@ -324,13 +318,25 @@ func Load() (*Config, error) {
 	c.NumGroups = 1 << c.ShardBits
 	c.OTLPInterval = *otlpInterval
 
-	// Miner ingress ports must not collide with the user ingress ports on the
-	// same transport — they carry a different (privileged) frame class.
-	if c.MinerUDPListenPort != 0 && c.MinerUDPListenPort == c.UDPListenPort {
-		return nil, fmt.Errorf("miner-listen-port (%d) must differ from udp-listen-port", c.MinerUDPListenPort)
-	}
-	if c.MinerTCPListenPort != 0 && c.TCPListenPort != 0 && c.MinerTCPListenPort == c.TCPListenPort {
-		return nil, fmt.Errorf("miner-tcp-listen-port (%d) must differ from tcp-listen-port", c.MinerTCPListenPort)
+	// The TCP-family ports (reliable ingress + the two push-ingest lanes) must
+	// be mutually distinct — they all bind tcp6. UDP ingress is a separate
+	// transport namespace and may share a number.
+	tcpPorts := map[int]string{}
+	for _, p := range []struct {
+		v    int
+		name string
+	}{
+		{c.TCPListenPort, "tcp-listen-port"},
+		{c.SubtreeListenPort, "subtree-listen-port"},
+		{c.BlockListenPort, "block-listen-port"},
+	} {
+		if p.v == 0 {
+			continue
+		}
+		if prev, ok := tcpPorts[p.v]; ok {
+			return nil, fmt.Errorf("%s (%d) collides with %s", p.name, p.v, prev)
+		}
+		tcpPorts[p.v] = p.name
 	}
 
 	// Parse the PoW difficulty floor (Bitcoin compact nBits): hex (0x… / bare) or decimal.

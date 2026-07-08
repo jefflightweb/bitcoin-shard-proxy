@@ -1,0 +1,158 @@
+// Package worker — objingress.go provides ObjectIngress: a TCP listener that
+// accepts a single-class stream of BRC-143 subtree or BRC-144 block PUSH frames
+// (header-stripped, self-delimiting by their own counts — see shard-common/
+// objfmt) and reframes each into its multicast fabric frame for the forwarder.
+//
+// # Why a separate lane per class
+//
+// Push frames carry no magic and no FrameVer byte, so they cannot be routed on
+// a shared socket the way framed input is: the class is known only from which
+// port the object arrived on. Each class therefore rides its own dedicated,
+// tunnel-bound port (subtree 8726, block 8727 by convention) — a miner submits
+// as a tunnel consumer; the ports are never publicly exposed. This replaces the
+// deprecated privileged multicast miner port.
+//
+// # Why TCP
+//
+// A subtree can reach ~128 MiB (millions of node hashes), far past any datagram,
+// so objects are read from a byte stream with objfmt.Reader (which splits a
+// single-class stream into whole objects with no outer framing). Each object is
+// reframed with objfmt.MulticastBytes — subtree → BRC-132, block → the BRC-144
+// body carried verbatim in a BRC-131 block-control frame — and dispatched
+// through the shared forwarder exactly like any privileged frame (it stamps
+// HashKey/SeqNum from the observed source and egresses to the control group).
+package worker
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"sync"
+
+	"github.com/lightwebinc/shard-common/objfmt"
+	"github.com/lightwebinc/shard-proxy/forwarder"
+	"github.com/lightwebinc/shard-proxy/metrics"
+)
+
+// DefaultMaxObjectBytes bounds a single push object read off a connection. It
+// covers a large subtree (Teranode's subtreevalidation_max_incoming_subtree_bytes
+// default is 128 MiB) with headroom; a length field implying more is a protocol
+// error that drops the connection.
+const DefaultMaxObjectBytes = 256 << 20
+
+// ObjectIngress accepts a single-class TCP stream of push objects (subtree or
+// block) and reframes each into the fabric via the shared [forwarder.Forwarder].
+type ObjectIngress struct {
+	fwd       *forwarder.Forwarder
+	ifaces    []*net.Interface
+	rec       *metrics.Recorder
+	log       *slog.Logger
+	class     objfmt.Class
+	maxObject int
+}
+
+// NewObjectIngress constructs an ObjectIngress for the given push class
+// (objfmt.ClassSubtree or objfmt.ClassBlock). No sockets are opened until
+// [ObjectIngress.Run] is called.
+func NewObjectIngress(fwd *forwarder.Forwarder, ifaces []*net.Interface, rec *metrics.Recorder, class objfmt.Class) *ObjectIngress {
+	return &ObjectIngress{
+		fwd:       fwd,
+		ifaces:    ifaces,
+		rec:       rec,
+		log:       slog.Default().With("component", "obj-ingress", "class", class.String()),
+		class:     class,
+		maxObject: DefaultMaxObjectBytes,
+	}
+}
+
+// SetMaxObject overrides the single-object size bound. Call before [Run].
+func (oi *ObjectIngress) SetMaxObject(n int) {
+	if n > 0 {
+		oi.maxObject = n
+	}
+}
+
+// Run starts the TCP accept loop on listenAddr:listenPort. It blocks until done
+// is closed. Each accepted connection is handled in its own goroutine.
+func (oi *ObjectIngress) Run(listenAddr string, listenPort int, done <-chan struct{}) error {
+	addr := fmt.Sprintf("%s:%d", listenAddr, listenPort)
+	ln, err := net.Listen("tcp6", addr)
+	if err != nil {
+		return err
+	}
+	go func() {
+		<-done
+		_ = ln.Close()
+	}()
+	oi.log.Info("object ingress ready", "addr", ln.Addr())
+
+	targets, err := oi.fwd.OpenTargets(oi.ifaces, true)
+	if err != nil {
+		return err
+	}
+	defer forwarder.CloseTargets(targets, oi.log)
+
+	var connWG sync.WaitGroup
+	defer connWG.Wait()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if isClosedErr(err) {
+				return nil
+			}
+			oi.log.Warn("Accept error", "err", err)
+			continue
+		}
+		connWG.Add(1)
+		go func() {
+			defer connWG.Done()
+			go func() {
+				<-done
+				_ = conn.Close()
+			}()
+			// Per-connection Egress so the shared multicast sockets are not
+			// mutated concurrently across goroutines; flush per object to keep
+			// reliable-delivery latency low.
+			egr := forwarder.NewEgress(oi.fwd, targets, 1, oi.rec)
+			defer egr.Flush()
+			oi.handleConn(conn, egr)
+		}()
+	}
+}
+
+// handleConn reads whole push objects from conn and reframes each into the
+// fabric. The connection is closed on EOF, read error, or a malformed object
+// (which desyncs the single-class stream — there is no recovery point).
+func (oi *ObjectIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
+	defer func() { _ = conn.Close() }()
+	remote := conn.RemoteAddr()
+
+	rd := objfmt.NewReader(conn, oi.class)
+	rd.SetMaxObject(oi.maxObject)
+
+	for {
+		obj, err := rd.Next()
+		if err != nil {
+			if err != io.EOF && !isClosedErr(err) {
+				oi.log.Debug("object read error; closing connection", "remote", remote, "err", err)
+			}
+			return
+		}
+		raw, err := objfmt.MulticastBytes(oi.class, obj)
+		if err != nil {
+			// A malformed object desyncs the bare stream; drop the connection.
+			oi.log.Warn("object reframe error; closing connection", "remote", remote, "err", err)
+			return
+		}
+		// Privileged dispatch: raw carries the BRC-132/BRC-131 FrameVer, so the
+		// forwarder routes it to ProcessSubtreeData / ProcessBlock, stamps from
+		// the observed source, and egresses to the control group. raw is a fresh
+		// buffer independent of the reader window, valid until Flush.
+		oi.fwd.DispatchClass(egr, raw, remote, -1, forwarder.IngressPrivileged)
+		if egr != nil {
+			egr.Flush()
+		}
+	}
+}

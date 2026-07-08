@@ -419,50 +419,8 @@ func TestLoadRejectsUnknownSourceMode(t *testing.T) {
 	}
 }
 
-func TestLoadMinerIngressDefaults(t *testing.T) {
-	iface := realIface(t)
-	cfg, err := parseArgs(t, []string{"-iface", iface})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.MinerUDPListenPort != 0 || cfg.MinerTCPListenPort != 0 {
-		t.Errorf("miner ports default = (%d,%d), want (0,0)", cfg.MinerUDPListenPort, cfg.MinerTCPListenPort)
-	}
-	if cfg.TxAcceptPrivileged {
-		t.Error("TxAcceptPrivileged default = true, want false (transaction-only)")
-	}
-}
-
-func TestLoadMinerIngressValid(t *testing.T) {
-	iface := realIface(t)
-	cfg, err := parseArgs(t, []string{
-		"-iface", iface,
-		"-miner-listen-port", "9000",
-		"-miner-tcp-listen-port", "9002",
-		"-tx-accept-privileged",
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.MinerUDPListenPort != 9000 {
-		t.Errorf("MinerUDPListenPort = %d, want 9000", cfg.MinerUDPListenPort)
-	}
-	if cfg.MinerTCPListenPort != 9002 {
-		t.Errorf("MinerTCPListenPort = %d, want 9002", cfg.MinerTCPListenPort)
-	}
-	if !cfg.TxAcceptPrivileged {
-		t.Error("TxAcceptPrivileged = false, want true")
-	}
-}
-
-func TestLoadMinerPortCollision(t *testing.T) {
-	iface := realIface(t)
-	// UDP miner port colliding with the user UDP port is rejected.
-	if _, err := parseArgs(t, []string{"-iface", iface, "-miner-listen-port", "8725"}); err == nil {
-		t.Error("want error for miner-listen-port == udp-listen-port, got nil")
-	}
-	// TCP miner port colliding with an enabled user TCP port is rejected.
-	if _, err := parseArgs(t, []string{"-iface", iface, "-tcp-listen-port", "8726", "-miner-tcp-listen-port", "8726"}); err == nil {
-		t.Error("want error for miner-tcp-listen-port == tcp-listen-port, got nil")
-	}
-}
+// The miner multicast ingress port (privileged block/coinbase/subtree frames)
+// was fully deprecated 2026-07-07: ingress is transaction-only at the component
+// boundary and blocks/subtrees enter only as BRC-143/BRC-144 push frames on the
+// commercial proxy's tunnel-bound ports. The former -miner-listen-port /
+// -miner-tcp-listen-port / -tx-accept-privileged flags and their tests are gone.

@@ -10,9 +10,6 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-listen` | `LISTEN_ADDR` | `[::]` | Ingress bind address (without port) |
 | `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP listen port for incoming BSV transaction frames (BRC-12, BRC-124, or BRC-128) |
 | `-tcp-listen-port` | `TCP_LISTEN_PORT` | `0` | TCP ingress port for reliable delivery (0 = disabled) |
-| `-miner-listen-port` | `MINER_LISTEN_PORT` | `0` | UDP miner ingress for privileged frames (BRC-131 block / BRC-133 coinbase / BRC-132 subtree data); 0 = disabled. See [Miner-tier ingress gate](#miner-tier-ingress-gate) |
-| `-miner-tcp-listen-port` | `MINER_TCP_LISTEN_PORT` | `0` | TCP miner ingress for privileged frames; 0 = disabled |
-| `-tx-accept-privileged` | `TX_ACCEPT_PRIVILEGED` | `false` | Let the user transaction ingress also accept privileged frames (legacy single-port behaviour). `false` = the user port is transaction-only |
 | `-require-block-pow` | `REQUIRE_BLOCK_POW` | `false` | Gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header. Permissionless (validates work, not identity). See [Block-announce proof-of-work](#block-announce-proof-of-work) |
 | `-min-pow-bits` | `MIN_POW_BITS` | `0` | PoW difficulty floor in Bitcoin compact `nBits` form (e.g. `0x1d00ffff`); `0` = header self-consistency only (weak) |
 | `-iface` | `MULTICAST_IF` | `eth0` | Comma-separated NIC names for multicast egress |
@@ -92,59 +89,34 @@ shard-proxy \
 
 ---
 
-## Miner-tier ingress gate
+## Ingress is transaction-only (miner port deprecated)
 
-Block announcements (BRC-131), coinbase transactions (BRC-133), and subtree
-data (BRC-132) are privileged control-plane frames: each egresses to a
-broadcast group every subscriber receives. Only miner-tier peers should emit
-them — end-user / service consumers (which submit ordinary transactions) must
-not be able to announce blocks, including via a bridged libp2p path.
-
-The proxy enforces this as a **per-socket frame-class gate**, so a single edge
-can serve miners and ordinary consumers interleaved (the separation is the
-port, not the host):
+Ingress accepts **transactions only**: BRC-12 / 124 / 128 (an anchor is an
+ordinary transaction). Privileged control-plane frames — block announce
+(BRC-131), coinbase (BRC-133), subtree data (BRC-132) — arriving on an ingress
+socket are **dropped** and counted (`bsp_privileged_frame_rejected_total`).
 
 | Socket | Flag | Accepts |
 |--------|------|---------|
-| User / transaction ingress | `-udp-listen-port` (8725), `-tcp-listen-port` | BRC-12 / 124 / 128 transactions + BRC-134 anchor. Privileged BRC-131/133/132 frames are **dropped** and counted (`bsp_privileged_frame_rejected_total`). |
-| Miner ingress | `-miner-listen-port`, `-miner-tcp-listen-port` | Everything, including BRC-131/133/132. |
+| Transaction ingress | `-udp-listen-port` (8725), `-tcp-listen-port` | BRC-12 / 124 / 128 transactions + BRC-134 anchor. Privileged BRC-131/133/132 frames are dropped. |
 
-Opening a miner port is the proxy's "accept block/coinbase/subtree data?"
-switch — leave both at `0` and the proxy ingests transactions only. Expose the
-miner port to miner-tier peers alone, over their tunnels and/or with a firewall
-source restriction; the user port stays open to all consumers as today. The
-operator's control plane / firewall policy decides which peers may reach the
-miner port.
-
-```
-shard-proxy \
-  -iface eth0 \
-  -udp-listen-port 8725 \      # consumers: transactions only
-  -miner-listen-port 9000      # miners: privileged frames, tunnel-only
-```
-
-`-tx-accept-privileged` (default `false`) restores the legacy single-port
-behaviour where the user port also accepts privileged frames — use it for
-collapsed/dev nodes that ingest everything on one socket.
-
-> **Upgrade note:** the default is now secure (transaction-only user port). A
-> single-port deployment that relied on ingesting block/coinbase/subtree data
-> on 8725 must either configure a `-miner-listen-port` or set
-> `-tx-accept-privileged=true`.
-
-The gate is the application-layer enforcement point; it holds even if a
-network ACL is misconfigured. See [DESIGN.md § Ingress
-Authorization](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#ingress-authorization-miner-tier-gate).
+> **Deprecated 2026-07-07 — the miner multicast port is gone.** The former
+> `-miner-listen-port` / `-miner-tcp-listen-port` / `-tx-accept-privileged`
+> flags have been removed. Blocks and subtrees are no longer submitted as
+> multicast frames: a miner is a tunnel consumer that submits **BRC-144 block**
+> and **BRC-143 subtree** push frames on the commercial proxy's tunnel-bound
+> ports (8726 / 8727), which the proxy reframes into the fabric internally.
+> Multicast (BRC-131/132/133/134) is fabric-internal transport only. See
+> [architecture.md § Teranode Relationship — Design direction](https://github.com/lightwebinc/bsv-multicast/blob/main/multicast-skills/architecture.md).
 
 ---
 
 ## Block-announce proof-of-work
 
-The miner-tier gate above is **admission control** — a domain-local policy
-about whose traffic may use this operator's resources. It is identity/network
-based, which is permissioned by nature and does not generalise across domains.
-
-The proof-of-work gate is the **permissionless** complement: it validates the
+Transaction ingress is open by default. The proof-of-work gate is the
+**permissionless** control on block announces that reach the proxy over the
+fabric (inter-domain announces never pass a local ingress socket): it validates
+the
 *artifact*, not the emitter. With `-require-block-pow`, a BRC-131 block
 announce is forwarded only if its in-frame 80-byte header hashes under the
 target its own `nBits` claims, and that target is at least as hard as
