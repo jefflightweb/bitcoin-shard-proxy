@@ -3,19 +3,25 @@
 //
 // # Protocol
 //
-// Each TCP connection carries a stream of BRC-12, BRC-124, or BRC-128 frames with no framing
-// envelope. The proxy reads the minimum header first (44 bytes for BRC-12,
-// extended to 92 for BRC-124/BRC-128), then reads the declared payload:
+// A connection carries ONE of two grammars, detected from its first bytes —
+// the TCP mirror of the UDP magic-detect unification:
 //
-//  1. Read [frame.HeaderSizeLegacy] (44) bytes — enough to see the version byte
-//     and, for BRC-12, the PayLen field.
-//  2. If FrameVer == BRC-124/BRC-128: read 48 more bytes to complete the 92-byte header
-//     (bytes 44–91), which includes the 4-byte PayLen field at bytes 88–91.
-//  3. Read PayLen bytes of payload.
-//  4. Forward assembled frame to [forwarder.Forwarder.Process].
+//   - FRAMED: leads with the BSV network magic. A stream of BRC-12, BRC-124,
+//     or BRC-128 frames with no framing envelope. The proxy reads the minimum
+//     header first (44 bytes for BRC-12, extended to 92 for BRC-124/BRC-128),
+//     then the declared payload, and forwards each assembled frame via
+//     [forwarder.Forwarder.DispatchClass].
+//   - BARE: anything else. A stream of bare transactions (BRC-30 EF
+//     submissions; BRC-12 raw only when EF-native is off), one after another,
+//     self-delimiting by transaction structure (objfmt.ClassTx). Each is
+//     admitted through the shared bare path — TxSize-validated, EF-gated,
+//     reframed to an unstamped BRC-124/128 frame, stamped from the observed
+//     source — exactly as a bare UDP submission.
+//
+// The connection commits to its grammar for its lifetime.
 //
 // A [bufio.Reader] (64 KiB) absorbs kernel round-trips under burst load.
-// BRC-12, BRC-124, and BRC-128 frames are forwarded verbatim.
+// Framed input is forwarded verbatim.
 package worker
 
 import (
@@ -27,6 +33,7 @@ import (
 	"sync"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/shard"
 	"github.com/lightwebinc/shard-proxy/forwarder"
 	"github.com/lightwebinc/shard-proxy/metrics"
@@ -167,6 +174,17 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 	br := bufio.NewReaderSize(conn, tcpBufSize)
 	hdrBuf := make([]byte, frame.HeaderSize)
 
+	// Grammar detection (once per connection): a framed stream leads with the
+	// BSV network magic; anything else is a bare transaction stream. A tx
+	// begins with its little-endian version (0x01/0x02, ...), which can never
+	// collide with magic byte 0xE3.
+	if first, err := br.Peek(4); err != nil {
+		return
+	} else if first[0] != 0xE3 || first[1] != 0xE1 || first[2] != 0xF3 || first[3] != 0xE8 {
+		ti.handleBareConn(br, remote, egr)
+		return
+	}
+
 	for {
 		// Step 1: read the minimum header (44 bytes). This covers both
 		// BRC-12 (complete header) and the leading 44 bytes of a BRC-124/BRC-128 header.
@@ -241,6 +259,35 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		// single routing authority shared with the UDP path.
 		ti.fwd.DispatchClass(egr, frameBuf, remote, -1, ti.class)
 		// TCP path: flush per frame to keep reliable-delivery latency low.
+		ti.flushEgr(egr)
+	}
+}
+
+// handleBareConn reads a stream of bare transactions (no frame header, no
+// envelope; delimited by transaction structure via objfmt.ClassTx) and admits
+// each through the shared [forwarder.Forwarder.DispatchClass] bare path:
+// TxSize-validated, EF-gated by the forwarder's require-ef setting, reframed
+// to an unstamped BRC-124/128 frame and stamped from the observed source —
+// byte-for-byte the same admission a bare UDP submission gets. A malformed
+// transaction desyncs the stream (there is no recovery boundary), so the
+// connection closes.
+func (ti *TCPIngress) handleBareConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress) {
+	rd := objfmt.NewReader(br, objfmt.ClassTx)
+	for {
+		obj, err := rd.Next()
+		if err != nil {
+			if err != io.EOF && !isClosedErr(err) {
+				ti.log.Debug("bare tx read error; closing connection", "remote", remote, "err", err)
+			}
+			return
+		}
+		if ti.rec != nil {
+			ti.rec.TCPBytesReceived(len(obj))
+		}
+		// DispatchClass sees no leading magic and routes to the bare path; obj
+		// is copied into a fresh framed buffer there, so the Reader window may
+		// be reused on the next iteration.
+		ti.fwd.DispatchClass(egr, obj, remote, -1, ti.class)
 		ti.flushEgr(egr)
 	}
 }
