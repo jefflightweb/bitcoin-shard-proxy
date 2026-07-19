@@ -37,11 +37,13 @@ const tcpBufSize = 64 * 1024 // 64 KiB read buffer per TCP connection
 // TCPIngress listens for TCP connections carrying a stream of BRC-12, BRC-124, or BRC-128 frames
 // and forwards each frame via the shared [forwarder.Forwarder].
 type TCPIngress struct {
-	fwd    *forwarder.Forwarder
-	ifaces []*net.Interface
-	rec    *metrics.Recorder
-	log    *slog.Logger
-	class  forwarder.IngressClass
+	fwd      *forwarder.Forwarder
+	ifaces   []*net.Interface
+	rec      *metrics.Recorder
+	log      *slog.Logger
+	class    forwarder.IngressClass
+	via      forwarder.EgressWriteFunc
+	viaFlush func() int
 }
 
 // NewTCPIngress constructs a TCPIngress. No sockets are opened until [Run] is
@@ -61,6 +63,31 @@ func NewTCPIngress(fwd *forwarder.Forwarder, ifaces []*net.Interface, rec *metri
 // Call before [Run].
 func (ti *TCPIngress) SetIngressClass(c forwarder.IngressClass) {
 	ti.class = c
+}
+
+// SetFlushVia replaces the default kernel-multicast egress flush with
+// [forwarder.Egress.FlushVia] through fn, followed by flush (which reports the
+// frames written). Used by an ingress-mode proxy to ship admitted lane frames
+// to its spine over a reliable pipeline instead of emitting multicast locally.
+// Call before [Run]. flush may be nil.
+func (ti *TCPIngress) SetFlushVia(fn forwarder.EgressWriteFunc, flush func() int) {
+	ti.via, ti.viaFlush = fn, flush
+}
+
+// flushEgr drains egr by the configured egress path: FlushVia + the sink's
+// flush when SetFlushVia was called, the kernel multicast Flush otherwise.
+func (ti *TCPIngress) flushEgr(egr *forwarder.Egress) {
+	if egr == nil {
+		return
+	}
+	if ti.via != nil {
+		egr.FlushVia(ti.via)
+		if ti.viaFlush != nil {
+			ti.viaFlush()
+		}
+		return
+	}
+	egr.Flush()
 }
 
 // Run starts the TCP accept loop on listenAddr:listenPort. It blocks until
@@ -119,7 +146,7 @@ func (ti *TCPIngress) Run(listenAddr string, listenPort int, done <-chan struct{
 			// so we flush per-frame to keep latency low instead of
 			// accumulating a batch.
 			egr := forwarder.NewEgress(ti.fwd, targets, 1, ti.rec)
-			defer egr.Flush()
+			defer ti.flushEgr(egr)
 			ti.handleConn(conn, egr)
 		}()
 	}
@@ -170,9 +197,7 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 				ti.rec.TCPBytesReceived(frame.SubtreeGroupAnnounceSize)
 			}
 			ti.fwd.ForwardControl(egr, ctrlBuf[:], shard.GroupSubtreeGroupAnnounce, ti.fwd.EgressPort())
-			if egr != nil {
-				egr.Flush()
-			}
+			ti.flushEgr(egr)
 			continue
 		case frame.FrameVerV1:
 			hdrSize = frame.HeaderSizeLegacy
@@ -214,8 +239,6 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		// single routing authority shared with the UDP path.
 		ti.fwd.DispatchClass(egr, frameBuf, remote, -1, ti.class)
 		// TCP path: flush per frame to keep reliable-delivery latency low.
-		if egr != nil {
-			egr.Flush()
-		}
+		ti.flushEgr(egr)
 	}
 }

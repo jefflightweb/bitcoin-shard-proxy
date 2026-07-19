@@ -50,6 +50,8 @@ type ObjectIngress struct {
 	log       *slog.Logger
 	class     objfmt.Class
 	maxObject int
+	via       forwarder.EgressWriteFunc
+	viaFlush  func() int
 }
 
 // NewObjectIngress constructs an ObjectIngress for the given push class
@@ -71,6 +73,31 @@ func (oi *ObjectIngress) SetMaxObject(n int) {
 	if n > 0 {
 		oi.maxObject = n
 	}
+}
+
+// SetFlushVia replaces the default kernel-multicast egress flush with
+// [forwarder.Egress.FlushVia] through fn, followed by flush (which reports the
+// frames written). Used by an ingress-mode proxy to ship reframed push objects
+// to its spine over a reliable pipeline instead of emitting multicast locally.
+// Call before [Run]. flush may be nil.
+func (oi *ObjectIngress) SetFlushVia(fn forwarder.EgressWriteFunc, flush func() int) {
+	oi.via, oi.viaFlush = fn, flush
+}
+
+// flushEgr drains egr by the configured egress path: FlushVia + the sink's
+// flush when SetFlushVia was called, the kernel multicast Flush otherwise.
+func (oi *ObjectIngress) flushEgr(egr *forwarder.Egress) {
+	if egr == nil {
+		return
+	}
+	if oi.via != nil {
+		egr.FlushVia(oi.via)
+		if oi.viaFlush != nil {
+			oi.viaFlush()
+		}
+		return
+	}
+	egr.Flush()
 }
 
 // Run starts the TCP accept loop on listenAddr:listenPort. It blocks until done
@@ -116,7 +143,7 @@ func (oi *ObjectIngress) Run(listenAddr string, listenPort int, done <-chan stru
 			// mutated concurrently across goroutines; flush per object to keep
 			// reliable-delivery latency low.
 			egr := forwarder.NewEgress(oi.fwd, targets, 1, oi.rec)
-			defer egr.Flush()
+			defer oi.flushEgr(egr)
 			oi.handleConn(conn, egr)
 		}()
 	}
@@ -151,8 +178,6 @@ func (oi *ObjectIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		// the observed source, and egresses to the control group. raw is a fresh
 		// buffer independent of the reader window, valid until Flush.
 		oi.fwd.DispatchClass(egr, raw, remote, -1, forwarder.IngressPrivileged)
-		if egr != nil {
-			egr.Flush()
-		}
+		oi.flushEgr(egr)
 	}
 }
