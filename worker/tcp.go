@@ -90,11 +90,13 @@ func (ti *TCPIngress) flushEgr(egr *forwarder.Egress) {
 	egr.Flush()
 }
 
-// Run starts the TCP accept loop on listenAddr:listenPort. It blocks until
+// Run starts the TCP accept loop on listenAddr:listenPort. The listener is
+// dual-stack (IPv4 + IPv6) when listenAddr is empty/wildcard — public ingress
+// must admit IPv4 submitters; the fabric behind it stays IPv6. It blocks until
 // done is closed. Each accepted connection is handled in its own goroutine.
 func (ti *TCPIngress) Run(listenAddr string, listenPort int, done <-chan struct{}) error {
 	addr := fmt.Sprintf("%s:%d", listenAddr, listenPort)
-	ln, err := net.Listen("tcp6", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("tcp-ingress: listen %s: %w", addr, err)
 	}

@@ -100,11 +100,14 @@ func (oi *ObjectIngress) flushEgr(egr *forwarder.Egress) {
 	egr.Flush()
 }
 
-// Run starts the TCP accept loop on listenAddr:listenPort. It blocks until done
-// is closed. Each accepted connection is handled in its own goroutine.
+// Run starts the TCP accept loop on listenAddr:listenPort. The listener is
+// dual-stack (IPv4 + IPv6) when listenAddr is empty/wildcard; the tunnel-side
+// deployment fences the push lanes to miner-tier IPv6 sources at the firewall.
+// It blocks until done is closed. Each accepted connection is handled in its
+// own goroutine.
 func (oi *ObjectIngress) Run(listenAddr string, listenPort int, done <-chan struct{}) error {
 	addr := fmt.Sprintf("%s:%d", listenAddr, listenPort)
-	ln, err := net.Listen("tcp6", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
