@@ -505,6 +505,11 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 // ── Record methods (hot path) ────────────────────────────────────────────────
 
 // PacketReceived records receipt of a raw datagram on the ingress socket.
+// Gatherer exposes the recorder's Prometheus registry so an embedding binary
+// (shard-proxy-1bsv) can merge the bsp_ family into its own /metrics endpoint
+// instead of running Serve on a second port.
+func (r *Recorder) Gatherer() promclient.Gatherer { return r.promReg }
+
 func (r *Recorder) PacketReceived(iface string, workerID int, size int) {
 	c := r.ifaceState(iface).worker(r, workerID)
 	c.rxPackets.Inc()
