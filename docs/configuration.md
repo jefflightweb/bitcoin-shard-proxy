@@ -495,3 +495,22 @@ Local floor on the bridging duration. `0` ⇒ honour the pilot's
 Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
 Chart: [`lightwebinc/shard-proxy-helm`](https://github.com/lightwebinc/shard-proxy-helm)
+
+## BRC-148 BEEF object plane
+
+BEEF is an **open ingress class**: submission records (leading `0xBEEF` tag —
+the third grammar on the tx port beside framed magic and bare tx) and framed
+`FrameVer 0x09` input are accepted on the public port regardless of these
+knobs. Canonical spec: `bsv-multicast/docs/brc-148-shard-domain-beef-plane.md`.
+
+| Flag / Env | Default | Description |
+|------------|---------|-------------|
+| `-beef-listen-port` / `BEEF_LISTEN_PORT` | `0` (off) | Optional dedicated single-class TCP lane (standard **8728**) for 5-tuple flow separation / load balancing — never admission. Included in the TCP-port collision check |
+| `-beef-shard-bits` / `BEEF_SHARD_BITS` | `4` | BEEF plane width (band `0x1000 + 2^bits` groups); valid 1–12; must match listeners/retry |
+| `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Maximum accepted object size (the spec's ingress MUST-bound); larger submissions are rejected and counted (`bsp_beef_submissions_total{result="oversize"}`) |
+
+The forwarder expands one record into one stamped frame per topic
+(`SubmitBEEF` → `ProcessBEEF`): HashKey = XXH64(sender ∥ banded groupIdx ∥
+**zeros** — TopicID is excluded from the flow key per the spec), ingress
+dedup claims the **(ContentID, TopicID) pair** under `bsp:beef:`, and objects
+exceeding `-frag-mtu` fragment via BRC-130 with `OrigFrameVer 0x09`.
