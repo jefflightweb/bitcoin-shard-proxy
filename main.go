@@ -392,6 +392,10 @@ func main() {
 			Pin: commanifest.Pin{
 				ShardBits:       uint8(cfg.ShardBits),
 				HasShardBitsPin: true,
+				// The BEEF plane's width is CLI-pinned too (manual wins),
+				// so per-domain adoption is divergence-observability; drop
+				// the pin to let quorum drive it.
+				DomainShardBits: map[uint8]uint8{shard.DomainBEEF: uint8(cfg.BEEFShardBits)},
 			},
 		})
 		hooks := proxymanifest.Hooks{
@@ -426,6 +430,18 @@ func main() {
 				slog.Warn("auto-config adopted new SourceMode (restart mode)",
 					"prev_ssm", prevSSM, "next_ssm", nextSSM)
 				restart.Request("source_mode change")
+				select {
+				case restartSig <- struct{}{}:
+				default:
+				}
+			},
+			OnDomainShardBitsChange: func(domain, prev, next uint8) {
+				// v1: BEEF plane resharding is restart-on-adopt (no
+				// bridging). With the CLI pin above this fires only if the
+				// pin is reconfigured; without it, on a quorum shift.
+				slog.Warn("auto-config adopted new object-plane ShardBits (restart mode)",
+					"domain", domain, "prev", prev, "next", next)
+				restart.Request("domain_shard_bits change")
 				select {
 				case restartSig <- struct{}{}:
 				default:

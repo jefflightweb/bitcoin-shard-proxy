@@ -53,6 +53,14 @@ type Hooks struct {
 	// or disappears. After is nil when the Successor is no longer
 	// adopted.
 	OnSuccessorChange func(before, after *commanifest.SuccessorView)
+
+	// OnDomainShardBitsChange fires when a BRC-148 object plane's adopted
+	// ShardBits transitions away from the previous value, keyed by
+	// DomainID (domain 0x0 is governed by OnShardBitsChange, never here).
+	// Like OnShardBitsChange, restart-vs-bridge is the caller's policy;
+	// with a per-domain pin the plane never adopts and this fires only if
+	// the pin itself is reconfigured.
+	OnDomainShardBitsChange func(domain, prev, next uint8)
 }
 
 // Applier is the periodic evaluator+notifier. The proxy applier does
@@ -108,6 +116,17 @@ func (a *Applier) Run(ctx context.Context) {
 			log.Info("Successor change", "prev", prev.Successor, "next", next.Successor)
 			a.Hooks.OnSuccessorChange(prev.Successor, next.Successor)
 		}
+		if a.Hooks.OnDomainShardBitsChange != nil {
+			for _, d := range domainShardBitsChanges(prev.Domains, next.Domains) {
+				log.Info("domain ShardBits change", "domain", d.domain, "prev", d.prev, "next", d.next)
+				a.Rec.ManifestAdoption("domain_shard_bits", reasonForChange(d.prev != 0))
+				a.Hooks.OnDomainShardBitsChange(d.domain, d.prev, d.next)
+			}
+		}
+		// Per-domain divergence surfaces via the shared DivergenceFields list.
+		for _, f := range next.DivergenceFields {
+			a.Rec.ManifestDivergence(f, "peer-disagree")
+		}
 		prev = next
 	}
 }
@@ -147,4 +166,25 @@ func reasonForChange(hadPrev bool) string {
 		return "quorum-shift"
 	}
 	return "bootstrap"
+}
+
+// domainChange is one per-domain ShardBits transition.
+type domainChange struct {
+	domain     uint8
+	prev, next uint8
+}
+
+// domainShardBitsChanges returns the per-domain ShardBits transitions between
+// two adopted views, in ascending DomainID order. A domain present in only
+// one map contributes a change from/to its zero value.
+func domainShardBitsChanges(prev, next map[uint8]commanifest.DomainAdoption) []domainChange {
+	var out []domainChange
+	for id := uint8(0); id <= 0x0E; id++ {
+		pv := prev[id].ShardBits
+		nv := next[id].ShardBits
+		if pv != nv {
+			out = append(out, domainChange{domain: id, prev: pv, next: nv})
+		}
+	}
+	return out
 }

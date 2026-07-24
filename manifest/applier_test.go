@@ -173,3 +173,52 @@ func TestApplier_SuccessorHookFiresAndClears(t *testing.T) {
 	}
 	_ = lastBefore
 }
+
+func beefDomainManifest(id uint32, sb, beefBits uint8) *frame.ShardManifest {
+	m := &frame.ShardManifest{
+		Flags: frame.ShardManifestFlagAuthoritative | frame.ShardManifestFlagDomainsValid |
+			frame.ShardManifestFlagGroupsValid | frame.ShardManifestFlagPilotOnly,
+		InstanceID:       id,
+		Epoch:            1746800000,
+		AnnounceInterval: 300,
+		ShardBits:        sb,
+		Groups:           []uint16{0},
+		Domains: []frame.DomainDescriptor{{
+			DomainID: 0x1, ShardBits: beefBits, SlotSpan: 1,
+			Flags: frame.DomainFlagActive,
+		}},
+	}
+	return m
+}
+
+func TestApplier_FiresDomainShardBitsHook(t *testing.T) {
+	reg := commanifest.NewRegistry(60 * time.Second)
+	ev := commanifest.NewEvaluator(commanifest.EvaluatorConfig{Quorum: 2, Hysteresis: 1 * time.Nanosecond})
+	reg.Upsert(mustAddr("fd20::1"), beefDomainManifest(1, 8, 12))
+	reg.Upsert(mustAddr("fd20::2"), beefDomainManifest(2, 8, 12))
+
+	var got struct {
+		mu           sync.Mutex
+		domain, next uint8
+		fired        bool
+	}
+	a := &Applier{
+		Registry: reg, Evaluator: ev, Interval: 10 * time.Millisecond,
+		Hooks: Hooks{
+			OnDomainShardBitsChange: func(domain, prev, next uint8) {
+				got.mu.Lock()
+				defer got.mu.Unlock()
+				got.fired, got.domain, got.next = true, domain, next
+			},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	a.Run(ctx)
+
+	got.mu.Lock()
+	defer got.mu.Unlock()
+	if !got.fired || got.domain != 0x1 || got.next != 12 {
+		t.Fatalf("domain hook: fired=%v domain=0x%X next=%d, want fired domain=0x1 next=12", got.fired, got.domain, got.next)
+	}
+}
