@@ -183,6 +183,7 @@ type Recorder struct {
 	// keyed by prefix (one allocation per distinct prefix at startup).
 	ingressDeduped        metric.Int64Counter // by worker, iface, frame_type (cold)
 	privilegedRejected    metric.Int64Counter // by frame_type (cold; miner-tier gate)
+	beefSubmissions       metric.Int64Counter // by result (cold; BRC-148 submission admission)
 	blockPoWRejected      metric.Int64Counter // block announces failing the PoW gate (cold)
 	promTxidClaimLocalHit *promclient.CounterVec
 	promTxidClaimWon      *promclient.CounterVec
@@ -472,6 +473,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("BRC-131 block announces dropped by the proof-of-work gate (invalid header PoW or below the difficulty floor)")); err != nil {
 		return nil, err
 	}
+	if r.beefSubmissions, err = meter.Int64Counter("bsp_beef_submissions_total",
+		metric.WithDescription("BRC-148 BEEF submission records by admission result (ok, malformed, oversize, bad_marker, disabled)")); err != nil {
+		return nil, err
+	}
 	// TxidClaim* are per-packet when ingress dedup is on; direct prometheus
 	// counters to skip the ~10% CPU spent in OTel int64Counter.Add.
 	r.promTxidClaimLocalHit = promclient.NewCounterVec(promclient.CounterOpts{
@@ -597,6 +602,7 @@ const (
 	IngressClassCoinbase                          // BRC-133 coinbase
 	IngressClassSubtree                           // BRC-132 subtree data
 	IngressClassAnchor                            // BRC-134 chained anchor
+	IngressClassBEEF                              // BRC-148 BEEF object
 	ingressClassCount
 )
 
@@ -610,6 +616,8 @@ func (c IngressFrameClass) String() string {
 		return "subtree"
 	case IngressClassAnchor:
 		return "anchor"
+	case IngressClassBEEF:
+		return "beef"
 	default:
 		return "tx"
 	}
@@ -645,6 +653,15 @@ func (r *Recorder) PrivilegedFrameRejected(frameType string) {
 // gate — its header failed PoW or claimed a difficulty below the configured floor.
 func (r *Recorder) BlockPoWRejected() {
 	r.blockPoWRejected.Add(context.Background(), 1)
+}
+
+// BEEFSubmission records one BRC-148 submission-record admission outcome
+// (result: ok, malformed, oversize, bad_marker, disabled). Drives the
+// ingress-abuse posture and the e2e admission assertions.
+func (r *Recorder) BEEFSubmission(result string) {
+	r.beefSubmissions.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("result", result),
+	))
 }
 
 // TxidClaimLocalHit records a tier-1 local-LRU short-circuit during TxID

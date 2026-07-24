@@ -170,6 +170,15 @@ func (oi *ObjectIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 			}
 			return
 		}
+		if oi.class == objfmt.ClassBEEF {
+			// The BEEF lane's object IS the submission record; the forwarder
+			// expands it into one FrameVer 0x09 frame per topic. Dispatch
+			// under IngressBEEF so a mis-sent non-BEEF grammar on this
+			// single-class port is rejected rather than admitted as tx.
+			oi.fwd.DispatchClass(egr, obj, remote, -1, forwarder.IngressBEEF)
+			oi.flushEgr(egr)
+			continue
+		}
 		raw, err := objfmt.MulticastBytes(oi.class, obj)
 		if err != nil {
 			// A malformed object desyncs the bare stream; drop the connection.

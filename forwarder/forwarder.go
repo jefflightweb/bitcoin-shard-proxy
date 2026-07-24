@@ -200,6 +200,14 @@ type Forwarder struct {
 	txDedup       TxidDedup
 	txDedupPrefix string
 
+	// BEEF object plane (BRC-148). beefEngine derives domain-tagged group
+	// indices (0x1000 + shardIndex(TopicID)) at the plane's own shard-bit
+	// width; beefMaxObject bounds an accepted submission's object bytes
+	// (the spec's ingress MUST-bound). Nil/zero until SetBEEF is called —
+	// submissions and V9 frames are then dropped as "disabled".
+	beefEngine    *shard.PlaneEngine
+	beefMaxObject int
+
 	// chains is a striped per-flow counter map. Stripe index is derived
 	// from a hash of the sender IP, so concurrent workers handling distinct
 	// senders rarely contend on the same stripe lock. Once a flowState
@@ -457,13 +465,26 @@ const (
 	// reachable solely by miner-tier peers.
 	IngressPrivileged IngressClass = iota
 
-	// IngressTransaction accepts only transaction-bearing frames
-	// (BRC-12/124/128 and BRC-134 anchor). BRC-131 block / BRC-133
-	// coinbase (FrameVerV4) and BRC-132 subtree data (FrameVerV5) are
-	// dropped and counted. This is the class for the public user/consumer
-	// ingress port.
+	// IngressTransaction accepts the open class set: transaction-bearing
+	// frames (BRC-12/124/128 and BRC-134 anchor), bare tx submissions, and
+	// BRC-148 BEEF objects (framed FrameVerV9 or a bare submission record).
+	// BRC-131 block / BRC-133 coinbase (FrameVerV4) and BRC-132 subtree
+	// data (FrameVerV5) are dropped and counted — broadcast-amplified
+	// classes enter only through a privileged socket. This is the class for
+	// the public user/consumer ingress port.
 	IngressTransaction
+
+	// IngressBEEF accepts only BRC-148 BEEF traffic (framed FrameVerV9 and
+	// bare submission records). It is the class for the optional dedicated
+	// BEEF lane (flow separation / load balancing — never admission: the
+	// open port accepts BEEF regardless).
+	IngressBEEF
 )
+
+// IngressOpen is the preferred name for the open class set accepted on the
+// public ingress port (tx + anchor + BEEF). Alias of [IngressTransaction],
+// kept for API compatibility.
+const IngressOpen = IngressTransaction
 
 // Dispatch routes one ingress datagram to the correct Process* entry point by
 // its BRC frame-version byte (raw[6]). It accepts every frame class
@@ -493,6 +514,19 @@ func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, worker
 	// as the raw[6] version byte the switch below already reads, so the framed
 	// relay hot path is byte-identical; the bare branch is cold (submissions only).
 	if n < 4 || binary.BigEndian.Uint32(raw[0:4]) != frame.MagicBSV {
+		// The bare grammar is 3-way (BRC-148): a BEEF submission record
+		// leads with the 0xBEEF tag (a bare tx's version byte[1] is 0x00; a
+		// framed datagram starts with the 0xE3 magic); anything else is a
+		// bare transaction. BEEF is an open class, so records are admitted
+		// on every ingress class.
+		if n >= 2 && binary.BigEndian.Uint16(raw[0:2]) == objfmt.BEEFRecordTag {
+			fw.SubmitBEEF(egr, raw, src, workerID)
+			return
+		}
+		if class == IngressBEEF {
+			fw.rejectOnBEEFLane(egr, workerID)
+			return
+		}
 		fw.dispatchBareTx(egr, raw, src, workerID)
 		return
 	}
@@ -521,20 +555,39 @@ func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, worker
 		}
 		fw.ProcessSubtreeData(egr, raw, src, workerID)
 	case n > 6 && raw[6] == frame.FrameVerV6:
+		if class == IngressBEEF {
+			fw.rejectOnBEEFLane(egr, workerID)
+			return
+		}
 		if fw.rec != nil {
 			fw.rec.IngressMetered(metrics.IngressClassAnchor, privileged, n)
 		}
 		fw.ProcessAnchor(egr, raw, src, workerID)
+	case n > 6 && raw[6] == frame.FrameVerV9:
+		// BRC-148 BEEF object frame — open class (relay or pre-framed
+		// submission), admitted on every ingress class.
+		if fw.rec != nil {
+			fw.rec.IngressMetered(metrics.IngressClassBEEF, privileged, n)
+		}
+		fw.ProcessBEEF(egr, raw, src, workerID)
 	case n > 6 && raw[6] == frame.FrameVerV8:
 		// BRC-142 bundle: an already-coalesced datagram of many transactions.
 		// Re-emit it verbatim to its group (a relay/spine forwarding bundles a
 		// collapsed/ingress proxy coalesced upstream). Bundles are tx-class, so
 		// no miner-tier gate; the origin already authorised the members.
+		if class == IngressBEEF {
+			fw.rejectOnBEEFLane(egr, workerID)
+			return
+		}
 		if fw.rec != nil {
 			fw.rec.IngressMetered(metrics.IngressClassTx, privileged, n)
 		}
 		fw.ProcessBundle(egr, raw, workerID)
 	default:
+		if class == IngressBEEF {
+			fw.rejectOnBEEFLane(egr, workerID)
+			return
+		}
 		if fw.rec != nil {
 			fw.rec.IngressMetered(metrics.IngressClassTx, privileged, n)
 		}

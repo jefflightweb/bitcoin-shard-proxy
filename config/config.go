@@ -83,6 +83,18 @@ type Config struct {
 	SubtreeListenPort int
 	BlockListenPort   int
 
+	// BRC-148 BEEF object plane. BEEF is an OPEN class: submission records
+	// (0xBEEF-tagged envelopes) and framed FrameVer 0x09 input are accepted
+	// on the public transaction port regardless of these knobs.
+	// BEEFListenPort optionally binds a dedicated single-class lane
+	// (standard 8728) for flow separation / load balancing — never
+	// admission. BEEFShardBits is the plane's shard-bit width (band
+	// 0x1000 + 2^bits groups); BEEFMaxObjectBytes bounds one accepted
+	// object (the spec's ingress MUST-bound).
+	BEEFListenPort     int
+	BEEFShardBits      uint
+	BEEFMaxObjectBytes int
+
 	EgressIfaces   []string // NIC names for multicast egress, e.g. ["eth0", "eth1"]
 	EgressPort     int      // Destination UDP port written into outgoing multicast datagrams
 	EgressHopLimit int      // IPV6_MULTICAST_HOPS for egress; 1 = single L2 segment, raise for routed/tunneled mesh fabrics
@@ -212,6 +224,12 @@ func Load() (*Config, error) {
 		"TCP port accepting BRC-143 subtree push frames (privileged; bind tunnel-side; standard 8726; 0 = disabled)")
 	flag.IntVar(&c.BlockListenPort, "block-listen-port", envInt("BLOCK_LISTEN_PORT", 0),
 		"TCP port accepting BRC-144 block push frames (privileged; bind tunnel-side; standard 8727; 0 = disabled)")
+	flag.IntVar(&c.BEEFListenPort, "beef-listen-port", envInt("BEEF_LISTEN_PORT", 0),
+		"optional dedicated TCP lane for BRC-148 BEEF submission records (flow separation only — BEEF also rides the tx port; standard 8728; 0 = disabled)")
+	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 4)),
+		"BRC-148 BEEF plane shard-bit width (band 0x1000 + 2^bits groups; 1-12)")
+	flag.IntVar(&c.BEEFMaxObjectBytes, "beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),
+		"maximum accepted BEEF object size in bytes (BRC-148 ingress bound)")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
 		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
 	flag.BoolVar(&c.RequireEF, "require-ef", envBool("REQUIRE_EF", false),
@@ -325,6 +343,16 @@ func Load() (*Config, error) {
 	c.NumGroups = 1 << c.ShardBits
 	c.OTLPInterval = *otlpInterval
 
+	// BRC-148 BEEF plane width. v1 caps at 12 (SlotSpan 1, band
+	// 0x1000–0x1FFF); wide planes are a spec-supported follow-up.
+	if *beefBits < 1 || *beefBits > 12 {
+		return nil, fmt.Errorf("beef-shard-bits must be in [1, 12], got %d", *beefBits)
+	}
+	c.BEEFShardBits = *beefBits
+	if c.BEEFMaxObjectBytes < 1 {
+		return nil, fmt.Errorf("beef-max-object-bytes must be positive, got %d", c.BEEFMaxObjectBytes)
+	}
+
 	// The TCP-family ports (reliable ingress + the two push-ingest lanes) must
 	// be mutually distinct — they all bind tcp6. UDP ingress is a separate
 	// transport namespace and may share a number.
@@ -336,6 +364,7 @@ func Load() (*Config, error) {
 		{c.TCPListenPort, "tcp-listen-port"},
 		{c.SubtreeListenPort, "subtree-listen-port"},
 		{c.BlockListenPort, "block-listen-port"},
+		{c.BEEFListenPort, "beef-listen-port"},
 	} {
 		if p.v == 0 {
 			continue

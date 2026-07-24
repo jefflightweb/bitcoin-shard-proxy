@@ -174,11 +174,16 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 	br := bufio.NewReaderSize(conn, tcpBufSize)
 	hdrBuf := make([]byte, frame.HeaderSize)
 
-	// Grammar detection (once per connection): a framed stream leads with the
-	// BSV network magic; anything else is a bare transaction stream. A tx
-	// begins with its little-endian version (0x01/0x02, ...), which can never
-	// collide with magic byte 0xE3.
+	// Grammar detection (once per connection), 3-way per BRC-148: a framed
+	// stream leads with the BSV network magic; a BEEF submission-record
+	// stream leads with the 0xBEEF record tag; anything else is a bare
+	// transaction stream. A tx begins with its little-endian version
+	// (0x01/0x02, byte[1] 0x00), which can never collide with magic byte
+	// 0xE3 or tag byte 0xBE.
 	if first, err := br.Peek(4); err != nil {
+		return
+	} else if first[0] == 0xBE && first[1] == 0xEF {
+		ti.handleBEEFConn(br, remote, egr)
 		return
 	} else if first[0] != 0xE3 || first[1] != 0xE1 || first[2] != 0xF3 || first[3] != 0xE8 {
 		ti.handleBareConn(br, remote, egr)
@@ -223,10 +228,10 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 			hdrSize = frame.HeaderSizeLegacy
 			payLen = int(uint32(hdrBuf[40])<<24 | uint32(hdrBuf[41])<<16 |
 				uint32(hdrBuf[42])<<8 | uint32(hdrBuf[43]))
-		case frame.FrameVerV2, frame.FrameVerV4, frame.FrameVerV5, frame.FrameVerV6:
+		case frame.FrameVerV2, frame.FrameVerV4, frame.FrameVerV5, frame.FrameVerV6, frame.FrameVerV9:
 			// Step 2: read the remaining 48 bytes to complete the 92-byte header
-			// (BRC-124/BRC-128, BRC-131 block control, or BRC-132 subtree data;
-			// includes PayLen at bytes 88–91).
+			// (BRC-124/BRC-128, BRC-131 block control, BRC-132 subtree data, or
+			// BRC-148 BEEF object; includes PayLen at bytes 88–91).
 			if _, err := io.ReadFull(br, hdrBuf[frame.HeaderSizeLegacy:frame.HeaderSize]); err != nil {
 				ti.log.Debug("TCP read header extension error", "remote", remote, "err", err)
 				return
@@ -271,6 +276,31 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 // byte-for-byte the same admission a bare UDP submission gets. A malformed
 // transaction desyncs the stream (there is no recovery boundary), so the
 // connection closes.
+// handleBEEFConn reads a stream of BRC-148 BEEF submission records (each an
+// explicit length-carrying envelope: 0xBEEF tag ∥ recordVer ∥ topics ∥
+// objectLen ∥ object) and admits each through the shared DispatchClass bare
+// path, which expands the record into one FrameVer 0x09 frame per topic.
+// BEEF is an open class, so the socket's IngressClass admits it regardless.
+func (ti *TCPIngress) handleBEEFConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress) {
+	rd := objfmt.NewReader(br, objfmt.ClassBEEF)
+	for {
+		rec, err := rd.Next()
+		if err != nil {
+			if err != io.EOF && !isClosedErr(err) {
+				ti.log.Debug("beef record read error; closing connection", "remote", remote, "err", err)
+			}
+			return
+		}
+		if ti.rec != nil {
+			ti.rec.TCPBytesReceived(len(rec))
+		}
+		// SubmitBEEF copies the object into fresh per-topic frame buffers, so
+		// the Reader window may be reused on the next iteration.
+		ti.fwd.DispatchClass(egr, rec, remote, -1, ti.class)
+		ti.flushEgr(egr)
+	}
+}
+
 func (ti *TCPIngress) handleBareConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress) {
 	rd := objfmt.NewReader(br, objfmt.ClassTx)
 	for {

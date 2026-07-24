@@ -159,6 +159,15 @@ func main() {
 	// Construct the shard engine. It is immutable and safe for concurrent use.
 	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)
 
+	// BRC-148 BEEF object-plane engine (domain 0x1, band 0x1000+). BEEF is
+	// an open ingress class, so the plane is always wired; only the optional
+	// dedicated lane is flag-gated.
+	beefEngine, err := shard.NewPlane(cfg.MCPrefix, cfg.MCGroupID, cfg.BEEFShardBits, shard.DomainBEEF)
+	if err != nil {
+		slog.Error("beef plane engine", "err", err)
+		os.Exit(1)
+	}
+
 	slog.Info("shard-proxy starting",
 		"workers", cfg.NumWorkers,
 		"shard_bits", cfg.ShardBits,
@@ -179,6 +188,7 @@ func main() {
 	fwd.SetEgressHopLimit(cfg.EgressHopLimit)
 	fwd.SetEgressLoop(cfg.EgressLoop)
 	fwd.SetRequireEF(cfg.RequireEF)
+	fwd.SetBEEF(beefEngine, cfg.BEEFMaxObjectBytes)
 	if cfg.RequireEF {
 		slog.Info("EF-native ingress enabled: raw BRC-12/BRC-124 transaction submissions rejected")
 	}
@@ -324,6 +334,19 @@ func main() {
 			}
 		}()
 		slog.Info("block push ingress enabled (BRC-144 → BRC-131 body-verbatim)", "listen_port", cfg.BlockListenPort)
+	}
+	// Optional dedicated BRC-148 BEEF lane (flow separation / LB only —
+	// records also ride the tx port as an open class).
+	if cfg.BEEFListenPort > 0 {
+		oi := worker.NewObjectIngress(fwd, ifaces, rec, objfmt.ClassBEEF)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := oi.Run(cfg.ListenAddr, cfg.BEEFListenPort, done); err != nil {
+				slog.Error("beef ingress exited with error", "err", err)
+			}
+		}()
+		slog.Info("beef lane enabled (BRC-148 records → FrameVer 0x09)", "listen_port", cfg.BEEFListenPort)
 	}
 
 	// ── BRC-139 manifest consumer (auto-shard-config) ────────────────────

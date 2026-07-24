@@ -30,10 +30,11 @@ import (
 // returns. The verbatim forwarding path feeds bytes from a receive batch
 // whose buffers are reused only after Flush; fragment-path payloads come
 // from a per-Egress sync.Pool and are released back at Flush time.
-// maxGroupCache bounds the per-group destination-address caches. shardBits is
-// capped at 12, so group indices occupy [0, 4096). Out-of-range indices fall
+// maxGroupCache bounds the per-group destination-address caches. It covers
+// the transaction plane (shardBits ≤ 12 ⇒ indices [0, 0x1000)) plus the
+// BRC-148 BEEF object plane band (0x1000–0x1FFF). Out-of-range indices fall
 // back to per-packet allocation (never hit in practice).
-const maxGroupCache = 1 << 12
+const maxGroupCache = 1 << 13
 
 type Egress struct {
 	targets []Target
