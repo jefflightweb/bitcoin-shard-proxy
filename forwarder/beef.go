@@ -97,9 +97,19 @@ func (fw *Forwarder) SubmitBEEF(egr *Egress, rec []byte, src net.Addr, workerID 
 		result = "bad_marker"
 		return
 	}
+	// OSS default stance: single-topic only. Multi-topic fan-out (one object →
+	// N topic frames = up-to-15× amplification) is an authenticated capability
+	// reserved for the commercial ingress per BRC-149 §Fan-out admission; the
+	// OSS open ingress admits TopicCount == 1 and rejects any record naming more
+	// than one topic. The wire grammar still carries 1..15 (the codec is shared);
+	// this is an admission gate, not a format change.
+	if len(r.Topics) > 1 {
+		result = "multi_topic"
+		return
+	}
 
-	// Compute the object identity once; expand one frame per topic (sibling
-	// emissions share the ContentID by design).
+	// Compute the object identity once; emit the single topic's frame (the
+	// grammar permits more, but OSS admission caps at one — see above).
 	contentID := objfmt.ContentID(r.Object)
 	for _, topic := range r.Topics {
 		bf := &frame.BEEFFrame{

@@ -656,7 +656,9 @@ func (r *Recorder) BlockPoWRejected() {
 }
 
 // BEEFSubmission records one BRC-148 submission-record admission outcome
-// (result: ok, malformed, oversize, bad_marker, disabled). Drives the
+// (result: ok, malformed, oversize, bad_marker, multi_topic, disabled).
+// multi_topic = a record naming >1 topic, rejected by the OSS single-topic
+// admission gate (multi-topic is a commercial capability). Drives the
 // ingress-abuse posture and the e2e admission assertions.
 func (r *Recorder) BEEFSubmission(result string) {
 	r.beefSubmissions.Add(context.Background(), 1, metric.WithAttributes(

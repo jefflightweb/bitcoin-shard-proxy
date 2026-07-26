@@ -96,40 +96,38 @@ func TestDispatchClass_BEEFLaneRejectsOthers(t *testing.T) {
 	}
 }
 
-// TestSubmitBEEF_Expansion proves one multi-topic record expands into one
-// stamped frame per topic, siblings sharing ContentID, each addressed into
-// the 0x1000 plane band.
-func TestSubmitBEEF_Expansion(t *testing.T) {
+// TestSubmitBEEF_SingleTopic proves one single-topic record emits one stamped
+// frame addressed into the 0x1000 plane band, carrying the object's ContentID.
+// Multi-topic expansion is a commercial capability; the OSS admission gate
+// rejects records naming >1 topic (see TestSubmitBEEF_Rejects/"multi_topic").
+func TestSubmitBEEF_SingleTopic(t *testing.T) {
 	fw, pe := makeBEEFForwarder(t)
 	src := &net.UDPAddr{IP: net.ParseIP("::1"), Port: 12345}
 	conn, _ := openLoopbackUDP(t)
 	egr := makeEgress(t, fw, conn)
 
-	topics := []string{"tm_alpha", "tm_beta"}
-	fw.SubmitBEEF(egr, buildBEEFRecordBytes(t, topics, beefTestObj), src, 0)
+	topic := "tm_alpha"
+	fw.SubmitBEEF(egr, buildBEEFRecordBytes(t, []string{topic}, beefTestObj), src, 0)
 
 	frames, _ := captureEnqueued(egr)
-	if len(frames) != 2 {
-		t.Fatalf("enqueued %d frames, want 2 (one per topic)", len(frames))
+	if len(frames) != 1 {
+		t.Fatalf("enqueued %d frames, want 1 (single topic)", len(frames))
 	}
-	wantContent := objfmt.ContentID(beefTestObj)
-	for i, raw := range frames {
-		bf, err := frame.DecodeBEEF(raw)
-		if err != nil {
-			t.Fatalf("frame %d: %v", i, err)
-		}
-		if bf.ContentID != wantContent {
-			t.Errorf("frame %d: sibling ContentID diverged", i)
-		}
-		if bf.TopicID != objfmt.TopicID(topics[i]) {
-			t.Errorf("frame %d: TopicID mismatch", i)
-		}
-		if bf.SeqNum == 0 || bf.HashKey == 0 {
-			t.Errorf("frame %d: not stamped (HashKey %X SeqNum %d)", i, bf.HashKey, bf.SeqNum)
-		}
-		if idx := pe.GroupIndex(&bf.TopicID); idx < 0x1000 || idx > 0x1FFF {
-			t.Errorf("frame %d: group 0x%04X outside the BEEF band", i, idx)
-		}
+	bf, err := frame.DecodeBEEF(frames[0])
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if bf.ContentID != objfmt.ContentID(beefTestObj) {
+		t.Errorf("ContentID mismatch")
+	}
+	if bf.TopicID != objfmt.TopicID(topic) {
+		t.Errorf("TopicID mismatch")
+	}
+	if bf.SeqNum == 0 || bf.HashKey == 0 {
+		t.Errorf("not stamped (HashKey %X SeqNum %d)", bf.HashKey, bf.SeqNum)
+	}
+	if idx := pe.GroupIndex(&bf.TopicID); idx < 0x1000 || idx > 0x1FFF {
+		t.Errorf("group 0x%04X outside the BEEF band", idx)
 	}
 }
 
@@ -148,9 +146,10 @@ func TestSubmitBEEF_Rejects(t *testing.T) {
 		rec      []byte
 		maxBytes int
 	}{
-		"malformed":  {badVer, 1 << 20},
-		"bad_marker": {badMarker, 1 << 20},
-		"oversize":   {good, 4},
+		"malformed":   {badVer, 1 << 20},
+		"bad_marker":  {badMarker, 1 << 20},
+		"oversize":    {good, 4},
+		"multi_topic": {buildBEEFRecordBytes(t, []string{"tm_x", "tm_y"}, beefTestObj), 1 << 20},
 	}
 	for name, c := range cases {
 		fw, _ := makeBEEFForwarder(t)
@@ -236,18 +235,26 @@ func TestProcessBEEF_PairDedup(t *testing.T) {
 	fw.SetTxidDedup(&pairDedup{seen: map[[32]byte]bool{}}, "bsp:beef:")
 	src := &net.UDPAddr{IP: net.ParseIP("::1"), Port: 12345}
 	conn, _ := openLoopbackUDP(t)
-	egr := makeEgress(t, fw, conn)
 
-	rec := buildBEEFRecordBytes(t, []string{"tm_a", "tm_b"}, beefTestObj)
-	fw.SubmitBEEF(egr, rec, src, 0)
-	if got := countEnqueued(egr); got != 2 {
-		t.Fatalf("first submission enqueued %d, want 2 (siblings must not suppress each other)", got)
+	// The same object submitted to two DIFFERENT topics as separate single-topic
+	// records (the OSS gate caps each record at one topic) are distinct
+	// (ContentID, TopicID) pairs — neither suppresses the other.
+	egrA := makeEgress(t, fw, conn)
+	fw.SubmitBEEF(egrA, buildBEEFRecordBytes(t, []string{"tm_a"}, beefTestObj), src, 0)
+	if got := countEnqueued(egrA); got != 1 {
+		t.Fatalf("tm_a submission enqueued %d, want 1", got)
+	}
+	egrB := makeEgress(t, fw, conn)
+	fw.SubmitBEEF(egrB, buildBEEFRecordBytes(t, []string{"tm_b"}, beefTestObj), src, 0)
+	if got := countEnqueued(egrB); got != 1 {
+		t.Fatalf("tm_b (same object, new topic) enqueued %d, want 1 (distinct pair)", got)
 	}
 
+	// Re-submitting the same (object, topic) pair is suppressed by the pair claim.
 	egr2 := makeEgress(t, fw, conn)
-	fw.SubmitBEEF(egr2, rec, src, 0)
+	fw.SubmitBEEF(egr2, buildBEEFRecordBytes(t, []string{"tm_a"}, beefTestObj), src, 0)
 	if got := countEnqueued(egr2); got != 0 {
-		t.Fatalf("re-submission enqueued %d, want 0 (pair claim held)", got)
+		t.Fatalf("re-submission of tm_a enqueued %d, want 0 (pair claim held)", got)
 	}
 
 	// Same object to a NEW topic is a fresh pair — never suppressed.
