@@ -59,13 +59,14 @@ func runTCPConn(t *testing.T, stream []byte) [][]byte {
 }
 
 // TestTCPIngressBEEFRecordStream proves the tx port's third grammar: a
-// 0xBEEF-tagged record stream splits per record and expands per topic into
-// stamped FrameVer 0x09 frames.
+// 0xBEEF-tagged record stream splits per record into stamped FrameVer 0x09
+// frames (one per single-topic record). Multi-topic records are rejected by
+// the OSS single-topic admission gate.
 func TestTCPIngressBEEFRecordStream(t *testing.T) {
-	stream := append(mustRecord(t, []string{"tm_a"}), mustRecord(t, []string{"tm_b", "tm_c"})...)
+	stream := append(mustRecord(t, []string{"tm_a"}), mustRecord(t, []string{"tm_b"})...)
 	sunk := runTCPConn(t, stream)
-	if len(sunk) != 3 {
-		t.Fatalf("admitted %d frames, want 3 (1 + 2 topics)", len(sunk))
+	if len(sunk) != 2 {
+		t.Fatalf("admitted %d frames, want 2 (two single-topic records)", len(sunk))
 	}
 	for i, raw := range sunk {
 		if !frame.IsBEEFFrame(raw) {
@@ -75,6 +76,12 @@ func TestTCPIngressBEEFRecordStream(t *testing.T) {
 		if err != nil || bf.SeqNum == 0 {
 			t.Fatalf("frame %d not stamped: %v", i, err)
 		}
+	}
+
+	// A multi-topic record is rejected by the OSS single-topic gate — no frames
+	// reach the sink (multi-topic is a commercial capability).
+	if rejected := runTCPConn(t, mustRecord(t, []string{"tm_b", "tm_c"})); len(rejected) != 0 {
+		t.Fatalf("multi-topic record admitted %d frames, want 0 (rejected)", len(rejected))
 	}
 }
 
@@ -116,13 +123,17 @@ func runBEEFLane(t *testing.T, stream []byte) [][]byte {
 	return sunk
 }
 
-// TestObjectIngressBEEFLane proves the dedicated lane splits records and
-// expands topics like the shared port.
+// TestObjectIngressBEEFLane proves the dedicated lane splits records into one
+// frame per single-topic record like the shared port; multi-topic records are
+// rejected by the OSS single-topic admission gate (any open port is single-topic).
 func TestObjectIngressBEEFLane(t *testing.T) {
-	stream := append(mustRecord(t, []string{"tm_x", "tm_y"}), mustRecord(t, []string{"tm_z"})...)
+	stream := append(mustRecord(t, []string{"tm_x"}), mustRecord(t, []string{"tm_z"})...)
 	sunk := runBEEFLane(t, stream)
-	if len(sunk) != 3 {
-		t.Fatalf("beef lane admitted %d frames, want 3", len(sunk))
+	if len(sunk) != 2 {
+		t.Fatalf("beef lane admitted %d frames, want 2", len(sunk))
+	}
+	if rejected := runBEEFLane(t, mustRecord(t, []string{"tm_x", "tm_y"})); len(rejected) != 0 {
+		t.Fatalf("beef lane admitted %d frames from a multi-topic record, want 0 (rejected)", len(rejected))
 	}
 }
 
