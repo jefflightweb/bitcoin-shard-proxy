@@ -227,7 +227,7 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.BEEFListenPort, "beef-listen-port", envInt("BEEF_LISTEN_PORT", 0),
 		"optional dedicated TCP lane for BRC-148 BEEF submission records (flow separation only — BEEF also rides the tx port; standard 8728; 0 = disabled)")
 	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 4)),
-		"BRC-148 BEEF plane shard-bit width (band 0x1000 + 2^bits groups; 1-12)")
+		"BRC-148 BEEF plane shard-bit width (band 0x1000 + 2^bits groups; 0-12, 0 = single group)")
 	flag.IntVar(&c.BEEFMaxObjectBytes, "beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),
 		"maximum accepted BEEF object size in bytes (BRC-148 ingress bound)")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
@@ -346,7 +346,7 @@ func Load() (*Config, error) {
 	// BRC-148 BEEF plane width. v1 caps at 12 (SlotSpan 1, band
 	// 0x1000–0x1FFF); wide planes are a spec-supported follow-up.
 	if *beefBits < 1 || *beefBits > 12 {
-		return nil, fmt.Errorf("beef-shard-bits must be in [1, 12], got %d", *beefBits)
+		return nil, fmt.Errorf("beef-shard-bits must be in [0, 12], got %d", *beefBits)
 	}
 	c.BEEFShardBits = *beefBits
 	if c.BEEFMaxObjectBytes < 1 {
