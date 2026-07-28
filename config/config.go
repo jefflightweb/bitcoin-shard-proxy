@@ -345,7 +345,7 @@ func Load() (*Config, error) {
 
 	// BRC-148 BEEF plane width. v1 caps at 12 (SlotSpan 1, band
 	// 0x1000–0x1FFF); wide planes are a spec-supported follow-up.
-	if *beefBits < 1 || *beefBits > 12 {
+	if *beefBits > 12 {
 		return nil, fmt.Errorf("beef-shard-bits must be in [0, 12], got %d", *beefBits)
 	}
 	c.BEEFShardBits = *beefBits
