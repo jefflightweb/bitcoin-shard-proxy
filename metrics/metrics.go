@@ -184,6 +184,8 @@ type Recorder struct {
 	ingressDeduped        metric.Int64Counter // by worker, iface, frame_type (cold)
 	privilegedRejected    metric.Int64Counter // by frame_type (cold; miner-tier gate)
 	beefSubmissions       metric.Int64Counter // by result (cold; BRC-148 submission admission)
+	beefFanoutTopics      metric.Int64Counter // admitted multi-topic frames, free|billable
+	beefFanoutBytes       metric.Int64Counter // amplified object bytes, free|billable
 	blockPoWRejected      metric.Int64Counter // block announces failing the PoW gate (cold)
 	promTxidClaimLocalHit *promclient.CounterVec
 	promTxidClaimWon      *promclient.CounterVec
@@ -477,6 +479,14 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("BRC-148 BEEF submission records by admission result (ok, malformed, oversize, bad_marker, disabled)")); err != nil {
 		return nil, err
 	}
+	if r.beefFanoutTopics, err = meter.Int64Counter("bsp_beef_fanout_topics_total",
+		metric.WithDescription("BRC-149 topic frames emitted from ADMITTED multi-topic submissions, split free|billable by the operator's free-topic allowance N")); err != nil {
+		return nil, err
+	}
+	if r.beefFanoutBytes, err = meter.Int64Counter("bsp_beef_fanout_bytes_total",
+		metric.WithDescription("Object bytes amplified by multi-topic fan-out, split free|billable — billable is the delivery-rated overage (topics beyond N x object bytes)")); err != nil {
+		return nil, err
+	}
 	// TxidClaim* are per-packet when ingress dedup is on; direct prometheus
 	// counters to skip the ~10% CPU spent in OTel int64Counter.Add.
 	r.promTxidClaimLocalHit = promclient.NewCounterVec(promclient.CounterOpts{
@@ -664,6 +674,32 @@ func (r *Recorder) BEEFSubmission(result string) {
 	r.beefSubmissions.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("result", result),
 	))
+}
+
+// BEEFFanout records one ADMITTED multi-topic submission: topics is the frame
+// count emitted, free is the operator's allowance N applied to it, and
+// objectBytes is the object's size. Split free|billable so the billable series
+// is directly the delivery-rated overage — the amplification a submitter caused
+// beyond its allowance, priced as ordinary delivery volume (BRC-149 keeps
+// ingress itself unbilled).
+func (r *Recorder) BEEFFanout(topics, free, objectBytes int) {
+	if r == nil || r.beefFanoutTopics == nil {
+		return
+	}
+	billableTopics := topics - free
+	if billableTopics < 0 {
+		billableTopics = 0
+	}
+	freeTopics := topics - billableTopics
+	ctx := context.Background()
+	freeAttr := metric.WithAttributes(attribute.String("tier", "free"))
+	billAttr := metric.WithAttributes(attribute.String("tier", "billable"))
+	r.beefFanoutTopics.Add(ctx, int64(freeTopics), freeAttr)
+	r.beefFanoutBytes.Add(ctx, int64(freeTopics*objectBytes), freeAttr)
+	if billableTopics > 0 {
+		r.beefFanoutTopics.Add(ctx, int64(billableTopics), billAttr)
+		r.beefFanoutBytes.Add(ctx, int64(billableTopics*objectBytes), billAttr)
+	}
 }
 
 // TxidClaimLocalHit records a tier-1 local-LRU short-circuit during TxID

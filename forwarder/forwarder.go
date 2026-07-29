@@ -207,6 +207,7 @@ type Forwarder struct {
 	// submissions and V9 frames are then dropped as "disabled".
 	beefEngine    *shard.PlaneEngine
 	beefMaxObject int
+	beefPolicy    BEEFSubmitPolicy
 
 	// chains is a striped per-flow counter map. Stripe index is derived
 	// from a hash of the sender IP, so concurrent workers handling distinct

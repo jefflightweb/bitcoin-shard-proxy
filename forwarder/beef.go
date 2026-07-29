@@ -54,6 +54,38 @@ func beefClaimKey(contentID, topicID [32]byte) [32]byte {
 	return out
 }
 
+// BEEFSubmitPolicy extends submission admission beyond the OSS stance. The
+// OSS default (nil policy) admits TopicCount == 1 only — multi-topic fan-out
+// (one object → N topic frames, up-to-15× amplification) is an authenticated
+// capability per BRC-149 §Fan-out admission, and the open ingress has no
+// identity to hang it on. A commercial build installs a policy that decides
+// per SOURCE (e.g. consumer-tunnel STE ranges) and observes each admitted
+// fan-out for accounting (first-N-free overage is the caller's concern; the
+// forwarder reports what happened, it does not price it).
+type BEEFSubmitPolicy interface {
+	// AdmitTopics reports whether src may submit a record naming n topics
+	// (n ≥ 2; single-topic records are always admitted).
+	AdmitTopics(src net.IP, n int) bool
+	// OnFanout observes one admitted multi-topic record: the submitter, the
+	// number of topic frames emitted, and the object's byte length.
+	OnFanout(src net.IP, topics, objectBytes int)
+}
+
+// SetBEEFSubmitPolicy installs the multi-topic admission policy (nil = the
+// OSS single-topic stance).
+func (fw *Forwarder) SetBEEFSubmitPolicy(p BEEFSubmitPolicy) { fw.beefPolicy = p }
+
+// srcIPOf extracts the bare IP from a UDP/TCP source address (nil if unknown).
+func srcIPOf(src net.Addr) net.IP {
+	switch a := src.(type) {
+	case *net.UDPAddr:
+		return a.IP
+	case *net.TCPAddr:
+		return a.IP
+	}
+	return nil
+}
+
 // rejectOnBEEFLane drops a non-BEEF datagram received on the dedicated BEEF
 // lane (single-class port).
 func (fw *Forwarder) rejectOnBEEFLane(egr *Egress, workerID int) {
@@ -108,8 +140,10 @@ func (fw *Forwarder) SubmitBEEF(egr *Egress, rec []byte, src net.Addr, workerID 
 	// than one topic. The wire grammar still carries 1..15 (the codec is shared);
 	// this is an admission gate, not a format change.
 	if len(r.Topics) > 1 {
-		result = "multi_topic"
-		return
+		if fw.beefPolicy == nil || !fw.beefPolicy.AdmitTopics(srcIPOf(src), len(r.Topics)) {
+			result = "multi_topic"
+			return
+		}
 	}
 
 	// Compute the object identity once; emit the single topic's frame (the
@@ -131,6 +165,9 @@ func (fw *Forwarder) SubmitBEEF(egr *Egress, rec []byte, src net.Addr, workerID 
 			fw.rec.IngressMetered(metrics.IngressClassBEEF, false, wn)
 		}
 		fw.ProcessBEEF(egr, buf[:wn], src, workerID)
+	}
+	if len(r.Topics) > 1 && fw.beefPolicy != nil {
+		fw.beefPolicy.OnFanout(srcIPOf(src), len(r.Topics), len(r.Object))
 	}
 }
 
