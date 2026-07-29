@@ -69,11 +69,33 @@ type BEEFSubmitPolicy interface {
 	// OnFanout observes one admitted multi-topic record: the submitter, the
 	// number of topic frames emitted, and the object's byte length.
 	OnFanout(src net.IP, topics, objectBytes int)
+	// MaxObjectBytes returns a per-source object bound overriding the operator's
+	// open-ingress bound (0 = no override). Authenticated sources may carry a
+	// larger allowance than the open path — identity makes abuse accountable
+	// (roadmap D9). It may only RAISE the bound: the caller keeps the stricter
+	// of the two, so a policy can never widen past the configured ceiling by
+	// returning something absurd.
+	MaxObjectBytes(src net.IP) int
 }
 
 // SetBEEFSubmitPolicy installs the multi-topic admission policy (nil = the
 // OSS single-topic stance).
 func (fw *Forwarder) SetBEEFSubmitPolicy(p BEEFSubmitPolicy) { fw.beefPolicy = p }
+
+// beefObjectBoundFor resolves the object bound for one submitter: the policy's
+// per-source allowance when it EXCEEDS the operator's open bound, else the open
+// bound. Never returns less than configured — a policy cannot tighten below the
+// operator's floor, only lift an authenticated source above it.
+func (fw *Forwarder) beefObjectBoundFor(src net.Addr) int {
+	base := fw.beefMaxObject
+	if fw.beefPolicy == nil {
+		return base
+	}
+	if lifted := fw.beefPolicy.MaxObjectBytes(srcIPOf(src)); lifted > base {
+		return lifted
+	}
+	return base
+}
 
 // srcIPOf extracts the bare IP from a UDP/TCP source address (nil if unknown).
 func srcIPOf(src net.Addr) net.IP {
@@ -125,7 +147,7 @@ func (fw *Forwarder) SubmitBEEF(egr *Egress, rec []byte, src net.Addr, workerID 
 		result = "malformed"
 		return
 	}
-	if fw.beefMaxObject > 0 && len(r.Object) > fw.beefMaxObject {
+	if maxObj := fw.beefObjectBoundFor(src); maxObj > 0 && len(r.Object) > maxObj {
 		result = "oversize"
 		return
 	}
