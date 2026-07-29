@@ -226,7 +226,7 @@ func Load() (*Config, error) {
 		"TCP port accepting BRC-144 block push frames (privileged; bind tunnel-side; standard 8727; 0 = disabled)")
 	flag.IntVar(&c.BEEFListenPort, "beef-listen-port", envInt("BEEF_LISTEN_PORT", 0),
 		"optional dedicated TCP lane for BRC-148 BEEF submission records (flow separation only — BEEF also rides the tx port; standard 8728; 0 = disabled)")
-	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 4)),
+	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 0)),
 		"BRC-148 BEEF plane shard-bit width (band 0x1000 + 2^bits groups; 0-12, 0 = single group)")
 	flag.IntVar(&c.BEEFMaxObjectBytes, "beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),
 		"maximum accepted BEEF object size in bytes (BRC-148 ingress bound)")

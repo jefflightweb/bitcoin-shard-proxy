@@ -245,7 +245,24 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 			return
 		}
 
-		// Step 3: allocate frame buffer and read payload.
+		// Step 3: bound the DECLARED length before allocating against it. A
+		// 92-byte header can otherwise command a ~4 GiB allocation (payLen is
+		// attacker-declared). The general ceiling matches the object-stream
+		// reader (objfmt.DefaultMaxObject); FrameVer 0x09 additionally honours
+		// the operator's -beef-max-object-bytes, per BRC-149's ingress MUST —
+		// without this, pre-framing over TCP bypasses the submission bound.
+		if payLen < 0 || payLen > objfmt.DefaultMaxObject {
+			ti.log.Warn("TCP declared payload exceeds stream ceiling; closing",
+				"remote", remote, "ver", hdrBuf[6], "paylen", payLen)
+			return
+		}
+		if hdrBuf[6] == frame.FrameVerV9 {
+			if maxObj := ti.fwd.BEEFMaxObject(); maxObj > 0 && payLen > maxObj {
+				ti.log.Warn("TCP BEEF frame exceeds -beef-max-object-bytes; closing",
+					"remote", remote, "paylen", payLen, "max", maxObj)
+				return
+			}
+		}
 		frameBuf := make([]byte, hdrSize+payLen)
 		copy(frameBuf, hdrBuf[:hdrSize])
 		if payLen > 0 {

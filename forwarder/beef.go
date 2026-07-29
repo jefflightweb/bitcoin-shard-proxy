@@ -32,6 +32,10 @@ var beefZeroIngredient [32]byte
 // SetBEEF wires the BEEF object plane: the plane-aware derivation engine and
 // the accepted-object byte bound. Must be called before workers start; until
 // then BEEF submissions and frames drop as "disabled".
+// BEEFMaxObject returns the operator's per-object byte bound (0 = unbounded),
+// for acceptance paths that must fail fast BEFORE buffering a declared length.
+func (fw *Forwarder) BEEFMaxObject() int { return fw.beefMaxObject }
+
 func (fw *Forwarder) SetBEEF(pe *shard.PlaneEngine, maxObjectBytes int) {
 	fw.beefEngine = pe
 	fw.beefMaxObject = maxObjectBytes
@@ -150,6 +154,18 @@ func (fw *Forwarder) ProcessBEEF(egr *Egress, raw []byte, src net.Addr, workerID
 		fw.log.Debug("beef frame decode error", "err", err, "len", len(raw))
 		if fw.rec != nil {
 			fw.rec.PacketDropped(egrIface(egr), workerID, "decode_error")
+		}
+		return
+	}
+
+	// The operator's object bound applies to EVERY acceptance path, not only the
+	// submission record: without this, pre-framing the object as FrameVer 0x09
+	// bypasses -beef-max-object-bytes entirely (BRC-149 makes the bound an
+	// ingress MUST). Whole frames are datagram/stream-bounded upstream, but the
+	// declared length is what downstream reassembly would allocate against.
+	if fw.beefMaxObject > 0 && len(bf.Payload) > fw.beefMaxObject {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(egrIface(egr), workerID, "beef_oversize")
 		}
 		return
 	}

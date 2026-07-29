@@ -295,3 +295,29 @@ func TestProcessBEEF_Fragmentation(t *testing.T) {
 		}
 	}
 }
+
+// The object bound MUST hold on the pre-framed path too: without it, framing
+// the object as FrameVer 0x09 bypasses -beef-max-object-bytes entirely
+// (BRC-149 makes the bound an ingress MUST, not a per-grammar nicety).
+func TestProcessBEEF_PreFramedOversizeDropped(t *testing.T) {
+	fw, _ := makeBEEFForwarder(t)
+	src := &net.UDPAddr{IP: net.ParseIP("fd00::99"), Port: 12345}
+	conn, _ := openLoopbackUDP(t)
+	egr := makeEgress(t, fw, conn)
+
+	big := make([]byte, 4096)
+	copy(big, beefTestObj) // valid marker, oversize body
+	fw.SetBEEF(fw.beefEngine, 1024)
+
+	fw.ProcessBEEF(egr, buildBEEFFrameBytes(t, "tm_oversize", big), src, 0)
+	if frames, _ := captureEnqueued(egr); len(frames) != 0 {
+		t.Fatalf("oversize pre-framed V9 forwarded (%d frames) — bound bypassed", len(frames))
+	}
+
+	// Same object under the bound passes (the bound, not the path, decides).
+	fw.SetBEEF(fw.beefEngine, 8192)
+	fw.ProcessBEEF(egr, buildBEEFFrameBytes(t, "tm_oversize2", big), src, 0)
+	if frames, _ := captureEnqueued(egr); len(frames) != 1 {
+		t.Fatalf("in-bound pre-framed V9 not forwarded")
+	}
+}
