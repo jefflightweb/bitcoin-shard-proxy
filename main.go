@@ -282,6 +282,7 @@ func main() {
 		w.SetRecvBatch(cfg.RecvBatch)
 		w.SetRecvBufBytes(cfg.RecvBufBytes)
 		w.SetIngressClass(userClass)
+		w.SetRetryTee(cfg.RetryTee)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

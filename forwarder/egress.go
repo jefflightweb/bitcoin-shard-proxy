@@ -52,6 +52,10 @@ type Egress struct {
 	// backing buffer to pool exactly once regardless of target count.
 	pooledBufs []*[]byte
 
+	// tee, when non-nil, mirrors DATA datagrams to a co-located retry cache over
+	// loopback. See retrytee.go for why this exists and why it is batched.
+	tee *retryTee
+
 	// addrCache[i][groupIdx] is the per-target destination *net.UDPAddr
 	// (IP+Port+Zone) for a data frame in group groupIdx. The multicast
 	// address is a pure function of (mcPrefix, groupID, groupIdx, port) and
@@ -140,6 +144,33 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 // shutdown lifecycle; do not mutate.
 func (e *Egress) Targets() []Target { return e.targets }
 
+// EnableRetryTee mirrors egressed DATA datagrams to a co-located retry cache at
+// addr (host:port, normally "[::1]:<ingress-port>"). See retrytee.go.
+func (e *Egress) EnableRetryTee(addr string, batchHint int) error {
+	t, err := newRetryTee(addr, batchHint)
+	if err != nil {
+		return err
+	}
+	e.tee = t
+	return nil
+}
+
+// RetryTeeFailed reports datagrams the tee could not deliver (0 when disabled).
+func (e *Egress) RetryTeeFailed() uint64 {
+	if e.tee == nil {
+		return 0
+	}
+	return e.tee.Failed()
+}
+
+// CloseRetryTee releases the tee socket.
+func (e *Egress) CloseRetryTee() error {
+	if e.tee == nil {
+		return nil
+	}
+	return e.tee.close()
+}
+
 // PoolGet returns a fragment-sized buffer from the pool, or nil if
 // fragmentation is disabled on the forwarder. Caller passes the returned
 // pointer to EnqueueDataPooled/EnqueueControlPooled so the buffer is
@@ -200,7 +231,18 @@ func (e *Egress) enqueue(raw []byte, dst net.UDPAddr, m msgMeta, pooled *[]byte)
 	}
 	// Data frames address a stable per-(target, group) multicast destination,
 	// so cache it; control frames carry an arbitrary dst and always build fresh.
-	cacheable := m.ctrlLabel == "" && m.groupIdx < maxGroupCache
+	isData := m.ctrlLabel == ""
+	// Mirror to the co-located cache. DATA only: the retry endpoint caches by
+	// (HashKey, SeqNum) and would count a control frame as a decode_error drop.
+	// This sits in enqueue deliberately — it is the one funnel every frame passes
+	// through AFTER SeqNum stamping and AFTER fragmentation, so the cached bytes
+	// are exactly what a NACK will ask for. Teeing any earlier would populate the
+	// cache with frames that do not match the requests it must answer, which is
+	// worse than an empty cache.
+	if e.tee != nil && isData {
+		e.tee.append(raw)
+	}
+	cacheable := isData && m.groupIdx < maxGroupCache
 	for i := range e.targets {
 		var addr *net.UDPAddr
 		if cacheable {
@@ -245,6 +287,14 @@ func (e *Egress) FlushVia(fn EgressWriteFunc) {
 		clear(e.msgs[i])
 		e.msgs[i] = e.msgs[i][:0]
 	}
+	// The alternative-transport path (AF_XDP TX) must drain the tee too, or its
+	// queue grows without bound for the whole life of the process. The tee stays
+	// an ordinary batched socket here: AF_XDP bypasses the kernel stack for the
+	// real egress, but nothing stops this process also issuing one sendmmsg to
+	// loopback per batch.
+	if e.tee != nil {
+		e.tee.flush()
+	}
 	for _, p := range e.pooledBufs {
 		e.pool.Put(p)
 	}
@@ -271,6 +321,11 @@ func (e *Egress) Flush() {
 		// net.UDPAddrs so they can be GC'd or reused safely.
 		clear(e.msgs[i])
 		e.msgs[i] = e.msgs[i][:0]
+	}
+	// Tee AFTER real egress: the forward path must never wait on a cache-fill,
+	// and pooled buffers are still valid until the release below.
+	if e.tee != nil {
+		e.tee.flush()
 	}
 	for _, p := range e.pooledBufs {
 		e.pool.Put(p)

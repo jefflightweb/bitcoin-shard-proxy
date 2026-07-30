@@ -75,7 +75,16 @@ type Worker struct {
 	recvBatch    int
 	recvBufBytes int
 	class        forwarder.IngressClass
+	// retryTee, when set, mirrors egressed DATA datagrams to a co-located retry
+	// cache (loopback host:port). Empty = disabled.
+	retryTee string
 }
+
+// SetRetryTee enables mirroring of egressed DATA datagrams to a co-located retry
+// endpoint's cache-ingest address. Needed on a node that ORIGINATES frames and
+// hosts its own retry cache (the collapsed edge): it cannot (S,G)-join its own
+// source, so without this its cache holds nothing of its own emissions.
+func (w *Worker) SetRetryTee(addr string) { w.retryTee = addr }
 
 // New constructs a Worker. No sockets are opened until [Run] is called.
 //
@@ -222,6 +231,15 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 	// last batch's egress is not lost.
 	egr := forwarder.NewEgress(w.fwd, targets, w.recvBatch, w.rec)
 	defer egr.Flush()
+	if w.retryTee != "" {
+		if err := egr.EnableRetryTee(w.retryTee, w.recvBatch); err != nil {
+			// Not fatal: the tee only warms a cache. Forwarding must continue.
+			w.log.Error("retry tee disabled", "addr", w.retryTee, "err", err)
+		} else {
+			w.log.Info("retry tee enabled", "addr", w.retryTee)
+			defer func() { _ = egr.CloseRetryTee() }()
+		}
+	}
 
 	// Wrap the ingress PacketConn so we can use ReadBatch (recvmmsg on
 	// Linux; per-packet fallback elsewhere).

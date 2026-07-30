@@ -150,6 +150,10 @@ type Config struct {
 	// low ingress rates. Minimum 1 (per-packet, equivalent to the legacy
 	// path). Default 32.
 	RecvBatch int
+	// RetryTee is the co-located retry-endpoint cache-ingest address ("" = off).
+	// A node that originates frames cannot (S,G)-join its own source, so its
+	// co-located cache holds nothing of its own emissions without this.
+	RetryTee string
 
 	// RecvBufBytes is the requested SO_RCVBUF size per worker socket. The
 	// kernel clamps to net.core.rmem_max. 0 = use the worker package default.
@@ -278,6 +282,8 @@ func Load() (*Config, error) {
 		"carry per-member TxID in the bundle (dedup/accounting) instead of recomputing on receipt")
 	flag.IntVar(&c.RecvBatch, "recv-batch", envInt("BSP_RECV_BATCH", 32),
 		"datagrams per recvmmsg syscall (1 = per-packet legacy path; 32 default)")
+	flag.StringVar(&c.RetryTee, "retry-tee", envStr("BSP_RETRY_TEE", ""),
+		"BRC-126: mirror each egressed DATA datagram to a co-located retry endpoint's cache-ingest address (e.g. \"[::1]:9001\"). Needed on a node that ORIGINATES frames and hosts its own retry cache (the collapsed edge): it must never (S,G)-join its own source, so its cache otherwise holds nothing of its own emissions and answers MISS for them. Copies are batched into ONE sendmmsg per egress batch, so the cost is per-batch, not per-frame. Empty = disabled")
 	flag.IntVar(&c.RecvBufBytes, "recv-buf-bytes", envInt("BSP_RECV_BUF_BYTES", 0),
 		"per-worker SO_RCVBUF in bytes (0 = worker default; capped by net.core.rmem_max)")
 	flag.BoolVar(&c.PprofEnabled, "pprof", envBool("BSP_PPROF", false),
