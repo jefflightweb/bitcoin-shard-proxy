@@ -51,7 +51,16 @@ type TCPIngress struct {
 	class    forwarder.IngressClass
 	via      forwarder.EgressWriteFunc
 	viaFlush func() int
+	// retryTee mirrors egressed DATA datagrams to a co-located retry cache.
+	// Each ingress path builds its OWN Egress, so the tee must be enabled on
+	// every one of them — a tee wired only into the UDP worker silently misses
+	// everything submitted over this path.
+	retryTee string
 }
+
+// SetRetryTee enables mirroring of egressed DATA datagrams to a co-located retry
+// endpoint's cache-ingest address. See forwarder/retrytee.go.
+func (ti *TCPIngress) SetRetryTee(addr string) { ti.retryTee = addr }
 
 // NewTCPIngress constructs a TCPIngress. No sockets are opened until [Run] is
 // called.
@@ -155,6 +164,13 @@ func (ti *TCPIngress) Run(listenAddr string, listenPort int, done <-chan struct{
 			// so we flush per-frame to keep latency low instead of
 			// accumulating a batch.
 			egr := forwarder.NewEgress(ti.fwd, targets, 1, ti.rec)
+			if ti.retryTee != "" {
+				if err := egr.EnableRetryTee(ti.retryTee, 1); err != nil {
+					ti.log.Error("retry tee disabled", "addr", ti.retryTee, "err", err)
+				} else {
+					defer func() { _ = egr.CloseRetryTee() }()
+				}
+			}
 			defer ti.flushEgr(egr)
 			ti.handleConn(conn, egr)
 		}()

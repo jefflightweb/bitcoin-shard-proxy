@@ -300,6 +300,7 @@ func main() {
 	if cfg.TCPListenPort > 0 {
 		rec.RequireTCPIngress()
 		tcpIngress := worker.NewTCPIngress(fwd, ifaces, rec)
+		tcpIngress.SetRetryTee(cfg.RetryTee)
 		tcpIngress.SetIngressClass(userClass)
 		wg.Add(1)
 		go func() {
@@ -316,6 +317,7 @@ func main() {
 	// carrying the BRC-144 body verbatim. Privileged — bind tunnel-side.
 	if cfg.SubtreeListenPort > 0 {
 		oi := worker.NewObjectIngress(fwd, ifaces, rec, objfmt.ClassSubtree)
+		oi.SetRetryTee(cfg.RetryTee)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

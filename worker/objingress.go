@@ -52,7 +52,16 @@ type ObjectIngress struct {
 	maxObject int
 	via       forwarder.EgressWriteFunc
 	viaFlush  func() int
+	// retryTee mirrors egressed DATA datagrams to a co-located retry cache.
+	// Each ingress path builds its OWN Egress, so the tee must be enabled on
+	// every one of them — a tee wired only into the UDP worker silently misses
+	// everything submitted over this path.
+	retryTee string
 }
+
+// SetRetryTee enables mirroring of egressed DATA datagrams to a co-located retry
+// endpoint's cache-ingest address. See forwarder/retrytee.go.
+func (oi *ObjectIngress) SetRetryTee(addr string) { oi.retryTee = addr }
 
 // NewObjectIngress constructs an ObjectIngress for the given push class
 // (objfmt.ClassSubtree or objfmt.ClassBlock). No sockets are opened until
@@ -146,6 +155,13 @@ func (oi *ObjectIngress) Run(listenAddr string, listenPort int, done <-chan stru
 			// mutated concurrently across goroutines; flush per object to keep
 			// reliable-delivery latency low.
 			egr := forwarder.NewEgress(oi.fwd, targets, 1, oi.rec)
+			if oi.retryTee != "" {
+				if err := egr.EnableRetryTee(oi.retryTee, 1); err != nil {
+					oi.log.Error("retry tee disabled", "addr", oi.retryTee, "err", err)
+				} else {
+					defer func() { _ = egr.CloseRetryTee() }()
+				}
+			}
 			defer oi.flushEgr(egr)
 			oi.handleConn(conn, egr)
 		}()
