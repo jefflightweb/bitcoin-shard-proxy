@@ -11,7 +11,7 @@
 //	-tcp-listen-port      TCP_LISTEN_PORT       0         TCP ingress port (0 = disabled)
 //	-subtree-listen-port  SUBTREE_LISTEN_PORT   0         TCP BRC-143 subtree push ingest (standard 8726; tunnel-side; 0 = disabled)
 //	-block-listen-port    BLOCK_LISTEN_PORT     0         TCP BRC-144 block push ingest (standard 8727; tunnel-side; 0 = disabled)
-//	-require-block-pow    REQUIRE_BLOCK_POW     false     Gate BRC-131 block announces on header proof-of-work
+//	-require-block-pow    REQUIRE_BLOCK_POW     true      Gate BRC-131 block announces on header proof-of-work
 //	-min-pow-bits         MIN_POW_BITS          0         PoW difficulty floor (compact nBits; 0 = self-consistency only)
 //	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
 //	-egress-port          EGRESS_PORT           9001      Destination port on groups
@@ -102,7 +102,7 @@ type Config struct {
 
 	// Proof-of-work gate for BRC-131 block announces. Permissionless: validates
 	// the in-frame header carries real work rather than authorizing the emitter.
-	// RequireBlockPoW is off by default. MinPoWBits is the difficulty floor in
+	// RequireBlockPoW is ON by default. MinPoWBits is the difficulty floor in
 	// Bitcoin compact (nBits) form; 0 = header self-consistency only (weak).
 	RequireBlockPoW bool
 	MinPoWBits      uint32
@@ -234,7 +234,7 @@ func Load() (*Config, error) {
 		"BRC-148 BEEF plane shard-bit width (band 0x1000 + 2^bits groups; 0-12, 0 = single group)")
 	flag.IntVar(&c.BEEFMaxObjectBytes, "beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),
 		"maximum accepted BEEF object size in bytes (BRC-148 ingress bound)")
-	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
+	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", true),
 		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
 	flag.BoolVar(&c.RequireEF, "require-ef", envBool("REQUIRE_EF", false),
 		"EF-native ingress: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted (relayed frames unaffected)")
