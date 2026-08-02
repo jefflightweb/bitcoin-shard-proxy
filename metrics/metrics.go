@@ -204,12 +204,22 @@ type Recorder struct {
 	tcpIngressReady    atomic.Bool
 
 	// BRC-139 manifest consumer metrics. Updated by the proxy's
-	// auto-config subsystem (shard-proxy/manifest).
+	// auto-config subsystem (shard-proxy/manifest). Names mirror the
+	// listener's multicast_manifest_* family so one dashboard covers both
+	// halves of the fleet.
 	manifestReceived      atomic.Int64
 	manifestPilotsKnown   atomic.Int64
 	manifestQuorumMetBits atomic.Int32
 	manifestReshardState  atomic.Int32
 	manifestReshardWindow atomic.Int64
+	manifestDivergence    metric.Int64Counter
+	manifestAdoption      metric.Int64Counter
+	manifestReshardEmit   metric.Int64Counter
+	// Unix seconds of the most recent divergence per field. Read by an
+	// observable gauge, so a stale timestamp is the signal — a field that
+	// stops diverging keeps its last value rather than disappearing.
+	lastDivergenceMu sync.Mutex
+	lastDivergence   map[string]int64
 
 	// Composed shutdown function (OTLP exporter + MeterProvider)
 	shutdownFn func(context.Context) error
@@ -289,12 +299,13 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 
 	r := &Recorder{
-		provider:    mp,
-		promReg:     promclient.Gatherers{reg, runtimeReg},
-		promOtelReg: reg,
-		runtimeReg:  runtimeReg,
-		numWorkers:  numWorkers,
-		startTime:   time.Now(),
+		provider:       mp,
+		promReg:        promclient.Gatherers{reg, runtimeReg},
+		promOtelReg:    reg,
+		runtimeReg:     runtimeReg,
+		numWorkers:     numWorkers,
+		startTime:      time.Now(),
+		lastDivergence: make(map[string]int64),
 		shutdownFn: func(ctx context.Context) error {
 			var last error
 			for _, fn := range shutdownFuncs {
@@ -416,6 +427,80 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithUnit("s"),
 		metric.WithFloat64Callback(func(_ context.Context, o metric.Float64Observer) error {
 			o.Observe(time.Since(r.startTime).Seconds())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
+	// BRC-139 manifest consumer family. Registered here (not just tracked in
+	// atomics) so proxy-side divergence is observable — without it, half the
+	// fleet reports nothing and a cross-peer disagreement looks like silence.
+	if r.manifestDivergence, err = meter.Int64Counter("multicast_manifest_divergence_total",
+		metric.WithDescription("Authoritative-peer disagreements observed by the auto-config evaluator (BRC-139 §Divergence telemetry)")); err != nil {
+		return nil, err
+	}
+	if r.manifestAdoption, err = meter.Int64Counter("multicast_manifest_adoption_total",
+		metric.WithDescription("Times the auto-config evaluator newly adopted a value (bootstrap, quorum-shift, pin-removed)")); err != nil {
+		return nil, err
+	}
+	if r.manifestReshardEmit, err = meter.Int64Counter("multicast_manifest_resharding_emit_duplicates_total",
+		metric.WithDescription("Frames dual-emitted to both the current and successor layouts during a bridging window")); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_received_total",
+		metric.WithDescription("BRC-139 ShardManifest datagrams accepted and upserted into the manifest registry"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.manifestReceived.Load())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_pilots_known",
+		metric.WithDescription("Distinct authoritative announcers currently within TTL"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.manifestPilotsKnown.Load())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_quorum_met_bits",
+		metric.WithDescription("Bit0=shard_bits, bit1=source_mode, bit2=successor quorum-met flags"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(r.manifestQuorumMetBits.Load()))
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_last_divergence_epoch",
+		metric.WithDescription("Unix seconds of the most recent divergence observed per field; absent until a field first diverges"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			r.lastDivergenceMu.Lock()
+			defer r.lastDivergenceMu.Unlock()
+			for field, ts := range r.lastDivergence {
+				o.Observe(ts, metric.WithAttributes(attribute.String("field", field)))
+			}
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_resharding_state",
+		metric.WithDescription("0 steady, 1 bridging, 2 cutover-pending"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(r.manifestReshardState.Load()))
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_resharding_window_seconds",
+		metric.WithDescription("Seconds until TransitionEpoch (negative briefly during cutover)"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.manifestReshardWindow.Load())
 			return nil
 		}),
 	); err != nil {
@@ -799,15 +884,34 @@ func (r *Recorder) ManifestSetReshardWindowSeconds(s int64) {
 	r.manifestReshardWindow.Store(s)
 }
 
-// ManifestDivergence is a no-op placeholder kept for symmetry with the
-// listener-side recorder. Proxy-side divergence accounting can be added
-// alongside OTel registration when the manifest gauges are promoted to
-// observable callbacks.
-func (r *Recorder) ManifestDivergence(field, kind string) { _ = field; _ = kind }
+// ManifestDivergence increments the divergence counter and stamps the
+// per-field last-seen time. kind is currently always "peer-disagree" (the
+// only case the evaluator reports). nil-safe.
+func (r *Recorder) ManifestDivergence(field, kind string) {
+	if r == nil {
+		return
+	}
+	r.manifestDivergence.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("field", field),
+		attribute.String("kind", kind),
+	))
+	r.lastDivergenceMu.Lock()
+	r.lastDivergence[field] = time.Now().Unix()
+	r.lastDivergenceMu.Unlock()
+}
 
-// ManifestAdoption is a no-op placeholder for the same reason as
-// ManifestDivergence.
-func (r *Recorder) ManifestAdoption(field, reason string) { _ = field; _ = reason }
+// ManifestAdoption increments the adoption counter when the evaluator newly
+// adopts a value. reason: "bootstrap", "quorum-shift", "pin-removed".
+// nil-safe.
+func (r *Recorder) ManifestAdoption(field, reason string) {
+	if r == nil {
+		return
+	}
+	r.manifestAdoption.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("field", field),
+		attribute.String("reason", reason),
+	))
+}
 
 // ManifestReshardEmitDuplicate increments the live-reshard
 // duplicate-emit counter (proxy-side equivalent of the listener-side
@@ -816,9 +920,7 @@ func (r *Recorder) ManifestReshardEmitDuplicate() {
 	if r == nil {
 		return
 	}
-	// Use the same atomic for the proxy; explicit OTel registration
-	// follows when bridging-mode lands.
-	r.manifestReceived.Add(0) // touch to avoid unused-field warnings; replaced when OTel registered
+	r.manifestReshardEmit.Add(context.Background(), 1)
 }
 
 // SetDraining marks the recorder as draining. Once called, /readyz returns
