@@ -3,39 +3,9 @@
 // environment variables serve as fallbacks; hard-coded defaults apply when
 // neither is present.
 //
-// # Environment variable mapping
-//
-//	Flag             Env var          Default       Description
-//	-listen               LISTEN_ADDR           [::]      Ingress bind address
-//	-udp-listen-port      UDP_LISTEN_PORT       8725      UDP listen port
-//	-tcp-listen-port      TCP_LISTEN_PORT       0         TCP ingress port (0 = disabled)
-//	-subtree-listen-port  SUBTREE_LISTEN_PORT   0         TCP BRC-143 subtree push ingest (standard 8726; tunnel-side; 0 = disabled)
-//	-block-listen-port    BLOCK_LISTEN_PORT     0         TCP BRC-144 block push ingest (standard 8727; tunnel-side; 0 = disabled)
-//	-require-block-pow    REQUIRE_BLOCK_POW     true      Gate BRC-131 block announces on header proof-of-work
-//	-min-pow-bits         MIN_POW_BITS          0         PoW difficulty floor (compact nBits; 0 = self-consistency only)
-//	-iface                MULTICAST_IF          eth0      Comma-separated NICs for multicast egress
-//	-egress-port          EGRESS_PORT           9001      Destination port on groups
-//	-egress-hoplimit      EGRESS_HOPLIMIT       1         IPV6_MULTICAST_HOPS (raise for routed/tunneled mesh)
-//	-shard-bits           SHARD_BITS            2         Key bit width (1–12)
-//	-scope                MC_SCOPE              site      Multicast scope
-//	-mc-group-id          MC_GROUP_ID           0x000B    IANA group-id (default Bitcoin = 0x000B)
-//	-workers              NUM_WORKERS           NumCPU    Worker goroutine count
-//	-debug                DEBUG                 false     Per-packet logging + loopback
-//	-metrics-addr         METRICS_ADDR          :9100     HTTP bind for /metrics, /healthz, /readyz
-//	-drain-timeout        DRAIN_TIMEOUT         0s        Pre-drain delay before closing sockets (0 = disabled)
-//	-instance             INSTANCE_ID           hostname  OTel service.instance.id
-//	-otlp-endpoint        OTLP_ENDPOINT         ""        OTLP gRPC endpoint (empty = disabled)
-//	-otlp-interval        OTLP_INTERVAL         30s       OTLP push interval
-//	-frag-mtu             FRAG_MTU              0         Path MTU for BRC-130 fragmentation (0 = disabled)
-//	-coalesce             COALESCE              false     Opt-in BRC-142 frame coalescing
-//	-coalesce-max-bytes   COALESCE_MAX_BYTES    1500      Max coalesced bundle datagram size
-//	-coalesce-max-members COALESCE_MAX_MEMBERS  0         Max members per bundle (0 = MTU-bound)
-//	-coalesce-carry-txid  COALESCE_CARRY_TXID   false     Carry per-member TxID in the bundle
-//	-recv-batch           BSP_RECV_BATCH        32        Datagrams per recvmmsg syscall (1 = per-packet)
-//	-txid-dedup-redis-addr TXID_DEDUP_REDIS_ADDR ""       Redis address for ingress TxID dedup (empty = local-only)
-//	-txid-dedup-prefix    TXID_DEDUP_PREFIX     bsp:tx:   Redis key prefix for ingress dedup entries
-//	-txid-dedup-ttl       TXID_DEDUP_TTL        10m       TTL for ingress dedup Redis entries (1m..30m typical)
-//	-txid-dedup-local-cap TXID_DEDUP_LOCAL_CAP  1048576   Tier-1 local TxID set capacity (0 = disable proxy ingress dedup)
+// The authoritative flag / environment-variable reference (every flag, its
+// env var, default, and description) is docs/configuration.md; it is not
+// duplicated here.
 package config
 
 import (
@@ -233,7 +203,7 @@ func Load() (*Config, error) {
 	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 0)),
 		"BRC-148 BEEF plane shard-bit width (band 0x1000 + 2^bits groups; 0-12, 0 = single group)")
 	flag.IntVar(&c.BEEFMaxObjectBytes, "beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),
-		"maximum accepted BEEF object size in bytes (BRC-148 ingress bound)")
+		"maximum accepted BEEF object size in bytes (BRC-149 ingress bound)")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", true),
 		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
 	flag.BoolVar(&c.RequireEF, "require-ef", envBool("REQUIRE_EF", false),

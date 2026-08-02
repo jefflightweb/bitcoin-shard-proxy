@@ -79,7 +79,7 @@ func TestTCPIngressBEEFRecordStream(t *testing.T) {
 	}
 
 	// A multi-topic record is rejected by the OSS single-topic gate — no frames
-	// reach the sink (multi-topic is a commercial capability).
+	// reach the sink (multi-topic requires an authenticated submit policy).
 	if rejected := runTCPConn(t, mustRecord(t, []string{"tm_b", "tm_c"})); len(rejected) != 0 {
 		t.Fatalf("multi-topic record admitted %d frames, want 0 (rejected)", len(rejected))
 	}

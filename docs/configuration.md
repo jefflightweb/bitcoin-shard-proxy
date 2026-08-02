@@ -10,6 +10,8 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-listen` | `LISTEN_ADDR` | `[::]` | Ingress bind address (without port) |
 | `-udp-listen-port` | `UDP_LISTEN_PORT` | `8725` | UDP transaction ingress — **framed** (BRC-124/128/legacy BRC-12) or **bare** header-stripped transactions, auto-detected by the leading network magic (one tx per datagram). See [Transaction ingress](architecture.md#transaction-ingress-framed-bare-and-ef-native) |
 | `-tcp-listen-port` | `TCP_LISTEN_PORT` | `0` | TCP ingress port for reliable delivery (0 = disabled) |
+| `-subtree-listen-port` | `SUBTREE_LISTEN_PORT` | `0` | TCP port accepting BRC-143 subtree push frames (privileged; bind tunnel-side; standard 8726; 0 = disabled) |
+| `-block-listen-port` | `BLOCK_LISTEN_PORT` | `0` | TCP port accepting BRC-144 block push frames (privileged; bind tunnel-side; standard 8727; 0 = disabled) |
 | `-require-block-pow` | `REQUIRE_BLOCK_POW` | `true` | Gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header. Permissionless (validates work, not identity). **Default ON** — set `=false` to admit unvalidated announces. See [Block-announce proof-of-work](#block-announce-proof-of-work) |
 | `-require-ef` | `REQUIRE_EF` | `false` | **EF-native ingress**: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted. Relayed (already-stamped) frames are exempt, so the relay hot path is untouched. See [EF-native ingress](architecture.md#ef-native-ingress--require-ef) |
 | `-min-pow-bits` | `MIN_POW_BITS` | `0` | PoW difficulty floor in Bitcoin compact `nBits` form (e.g. `0x1d00ffff`); `0` = header self-consistency only (weak) |
@@ -39,6 +41,7 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-coalesce-max-members` | `COALESCE_MAX_MEMBERS` | `0` | Max member transactions per bundle (`0` = MTU-bound only) |
 | `-coalesce-carry-txid` | `COALESCE_CARRY_TXID` | `false` | Carry each member's 32-byte TxID on the wire (for downstream dedup / operator accounting) instead of recomputing it on receipt |
 | `-recv-batch` | `BSP_RECV_BATCH` | `32` | Datagrams per `recvmmsg` syscall (1 = per-packet legacy path) |
+| `-retry-tee` | `BSP_RETRY_TEE` | `""` | Mirror each egressed DATA datagram to a co-located retry endpoint's cache-ingest address (e.g. `[::1]:9001`) — needed on a node that originates frames and hosts its own retry cache, since it must never (S,G)-join its own source. Copies are batched into one `sendmmsg` per egress batch. Empty = disabled |
 | `-recv-buf-bytes` | `BSP_RECV_BUF_BYTES` | `0` | Per-worker `SO_RCVBUF` in bytes (`0` = system default; capped by `net.core.rmem_max`) |
 | `-ingress-dedup` | `INGRESS_DEDUP` | `true` | Enable ingress TxID dedup. `false` bypasses the dedup gate entirely — only sound for single-proxy ingest topologies. See [Ingress TxID Deduplication](#ingress-txid-dedup) |
 | `-pprof` | `BSP_PPROF` | `false` | Mount `net/http/pprof` at `/debug/pprof/*` on the metrics server (profiling only) |
@@ -69,14 +72,17 @@ This is the high-throughput path.
 ### TCP ingress (optional)
 
 TCP ingress provides reliable, ordered delivery for senders that require it
-(e.g. over lossy links). Each accepted connection carries a stream of BRC-12, BRC-124, or BRC-128
-frames concatenated end-to-end. The proxy reads 44 bytes first, then extends
-to 92 bytes if BRC-124 (`PayLen` at bytes 88–91), then reads `PayLen` payload bytes.
+(e.g. over lossy links). Grammar is detected **once per connection** from the
+leading bytes: a `0xBEEF` record tag selects a BEEF submission-record stream;
+the BSV network magic selects a framed stream (BRC-12, BRC-124, or BRC-128
+frames concatenated end-to-end — a 44-byte header read, extended to 92 bytes
+for 92-byte-header versions, then `PayLen` payload bytes); anything else is a
+bare transaction stream.
 
 TCP ingress is disabled by default. Enable it with:
 
 ```
--tcp-listen-port 9100
+-tcp-listen-port 8725
 ```
 
 Both transports can run at the same time:
@@ -85,7 +91,7 @@ Both transports can run at the same time:
 shard-proxy \
   -iface eth0 \
   -udp-listen-port 8725 \
-  -tcp-listen-port 9100
+  -tcp-listen-port 8725
 ```
 
 ---
@@ -105,10 +111,10 @@ socket are **dropped** and counted (`bsp_privileged_frame_rejected_total`).
 > `-miner-listen-port` / `-miner-tcp-listen-port` / `-tx-accept-privileged`
 > flags have been removed. Blocks and subtrees are no longer submitted as
 > multicast frames: a miner is a tunnel consumer that submits **BRC-144 block**
-> and **BRC-143 subtree** push frames on the commercial proxy's tunnel-bound
+> and **BRC-143 subtree** push frames on the proxy's tunnel-bound push
 > ports (8726 / 8727), which the proxy reframes into the fabric internally.
 > Multicast (BRC-131/132/133/134) is fabric-internal transport only. See
-> [architecture.md § Teranode Relationship — Design direction](https://github.com/lightwebinc/bsv-multicast/blob/main/multicast-skills/architecture.md).
+> [DESIGN.md § Ingress authorization (miner-tier gate)](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#ingress-authorization-miner-tier-gate).
 
 ---
 
@@ -157,8 +163,8 @@ multicast group index. The total number of groups is 2^N.
 | 12 | 4 096 | Maximum (BRC-129 bound) |
 
 BRC-129 zoning bounds shard group indices to `0x0000`–`0x0FFF`, so conformant
-deployments use at most 12 bits. (The flag validator currently accepts up to
-15 for lab use.)
+deployments use at most 12 bits. (The flag validator enforces the same bound:
+`[1, 12]`.)
 
 Increasing bits by 1 splits every existing group into two child groups
 (consistent hashing). Subscribers need only join additional groups.
@@ -312,7 +318,7 @@ shard-proxy \
 shard-proxy \
   -iface eth0 \
   -udp-listen-port 8725 \
-  -tcp-listen-port 9100
+  -tcp-listen-port 8725
 ```
 
 ### With graceful drain (behind a load balancer)
@@ -506,8 +512,8 @@ knobs. Canonical spec: `bsv-multicast/docs/brc-148-shard-domain-beef-plane.md`.
 | Flag / Env | Default | Description |
 |------------|---------|-------------|
 | `-beef-listen-port` / `BEEF_LISTEN_PORT` | `0` (off) | Optional dedicated single-class TCP lane (standard **8728**) for 5-tuple flow separation / load balancing — never admission. Included in the TCP-port collision check |
-| `-beef-shard-bits` / `BEEF_SHARD_BITS` | `4` | BEEF plane width (band `0x1000 + 2^bits` groups); valid 1–12; must match listeners/retry |
-| `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Maximum accepted object size (the spec's ingress MUST-bound); larger submissions are rejected and counted (`bsp_beef_submissions_total{result="oversize"}`) |
+| `-beef-shard-bits` / `BEEF_SHARD_BITS` | `0` | BEEF plane width (band `0x1000 + 2^bits` groups); valid 0–12 (`0` = single group); must match listeners/retry |
+| `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Maximum accepted object size (BRC-149's ingress MUST-bound); larger submissions are rejected and counted (`bsp_beef_submissions_total{result="oversize"}`) |
 
 The forwarder expands one record into one stamped frame per topic
 (`SubmitBEEF` → `ProcessBEEF`): HashKey = XXH64(sender ∥ banded groupIdx ∥

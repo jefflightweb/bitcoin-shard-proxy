@@ -422,5 +422,5 @@ func TestLoadRejectsUnknownSourceMode(t *testing.T) {
 // The miner multicast ingress port (privileged block/coinbase/subtree frames)
 // was fully deprecated 2026-07-07: ingress is transaction-only at the component
 // boundary and blocks/subtrees enter only as BRC-143/BRC-144 push frames on the
-// commercial proxy's tunnel-bound ports. The former -miner-listen-port /
+// proxy's tunnel-bound push ports. The former -miner-listen-port /
 // -miner-tcp-listen-port / -tx-accept-privileged flags and their tests are gone.

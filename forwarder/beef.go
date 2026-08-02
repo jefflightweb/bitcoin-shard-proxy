@@ -58,7 +58,7 @@ func beefClaimKey(contentID, topicID [32]byte) [32]byte {
 // OSS default (nil policy) admits TopicCount == 1 only — multi-topic fan-out
 // (one object → N topic frames, up-to-15× amplification) is an authenticated
 // capability per BRC-149 §Fan-out admission, and the open ingress has no
-// identity to hang it on. A commercial build installs a policy that decides
+// identity to hang it on. A downstream build installs a policy that decides
 // per SOURCE (e.g. consumer-tunnel STE ranges) and observes each admitted
 // fan-out for accounting (first-N-free overage is the caller's concern; the
 // forwarder reports what happened, it does not price it).
@@ -157,7 +157,7 @@ func (fw *Forwarder) SubmitBEEF(egr *Egress, rec []byte, src net.Addr, workerID 
 	}
 	// OSS default stance: single-topic only. Multi-topic fan-out (one object →
 	// N topic frames = up-to-15× amplification) is an authenticated capability
-	// reserved for the commercial ingress per BRC-149 §Fan-out admission; the
+	// reserved for authenticated ingress policies per BRC-149 §Fan-out admission; the
 	// OSS open ingress admits TopicCount == 1 and rejects any record naming more
 	// than one topic. The wire grammar still carries 1..15 (the codec is shared);
 	// this is an admission gate, not a format change.

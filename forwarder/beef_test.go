@@ -98,7 +98,7 @@ func TestDispatchClass_BEEFLaneRejectsOthers(t *testing.T) {
 
 // TestSubmitBEEF_SingleTopic proves one single-topic record emits one stamped
 // frame addressed into the 0x1000 plane band, carrying the object's ContentID.
-// Multi-topic expansion is a commercial capability; the OSS admission gate
+// Multi-topic expansion requires an authenticated submit policy; the OSS admission gate
 // rejects records naming >1 topic (see TestSubmitBEEF_Rejects/"multi_topic").
 func TestSubmitBEEF_SingleTopic(t *testing.T) {
 	fw, pe := makeBEEFForwarder(t)

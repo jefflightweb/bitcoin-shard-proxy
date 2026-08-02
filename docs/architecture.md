@@ -64,8 +64,8 @@ the BRC-129 shard zone `0x0000`–`0x0FFF`) are defined in `shard-common/shard/c
 Per BRC-129 §3, `GroupBlockBroadcast` uses **global scope (FF0E)** regardless of the data-plane scope, because block headers, coinbase, and anchor transactions must reach every subscriber across organisational boundaries.
 
 Per BRC-129 zoning, shard group indices are bounded to `0x0000`–`0x0FFF` — `-shard-bits`
-is at most 12 for conformant deployments (the flag validator currently accepts up to 15
-for lab use) — so user shard indices never overlap the control groups (`0xFFFA`–`0xFFFE`).
+is at most 12 for conformant deployments (the flag validator enforces `[1, 12]`) — so
+user shard indices never overlap the control groups (`0xFFFA`–`0xFFFE`).
 
 ## BRC-131 Block Control Frames (FrameVerV4)
 
@@ -312,7 +312,7 @@ Offset  Size  Align  Field          Value / notes
 ## Transaction ingress: framed, bare, and EF-native
 
 The transaction ingress port (`-udp-listen-port`, default 8725) accepts a
-transaction in two shapes, distinguished by the first four bytes:
+submission in three shapes, distinguished by the leading bytes:
 
 - **Framed** — a BRC-124/BRC-128 (or legacy BRC-12) frame, which begins with the
   BSV network magic `0xE3E1F3E8`. Decoded, dedup-claimed by TxID, stamped, and
@@ -322,6 +322,10 @@ transaction in two shapes, distinguished by the first four bytes:
   BRC-124/128 frame, and drives it through the same forward path. One
   transaction per datagram. This retires the need for a separate raw-tx port:
   submitters send bare transactions to the same 8725 as framed traffic.
+- **BEEF submission record** — a leading `0xBEEF` record tag (BRC-149).
+  `DispatchClass` routes it to `SubmitBEEF`, which expands the record into one
+  stamped `FrameVer 0x09` frame per submitted topic. BEEF is an open class, so
+  records are admitted on every ingress class.
 
 The magic pre-check is a single `uint32` compare in the same cache line as the
 frame-version byte the router already reads, so the framed relay hot path is
@@ -468,11 +472,15 @@ shard-proxy/
                      BridgingEngine dual-emit for live resharding;
                      opt-in BRC-142 coalescing (coalesce.go): within-batch
                      coalBuffer + FlushCoalesced origin packing, ProcessBundle
-                     verbatim spine relay
+                     verbatim spine relay; BRC-148/149 BEEF submission-record
+                     expansion + FrameVer 0x09 process path (beef.go);
+                     -retry-tee egress mirror to a co-located retry cache
+                     (retrytee.go)
   worker/            per-CPU SO_REUSEPORT UDP ingress loop using recvmmsg
                      (ReadBatch) with frame-version dispatch for BRC-131/
                      BRC-132/BRC-134 (worker.go); TCP ingress listener with
-                     BRC-127 routing (tcp.go)
+                     BRC-127 routing (tcp.go); single-class BRC-143/144 push
+                     lanes (objingress.go)
   manifest/          opt-in BRC-139 consumer: beacon-receive listener +
                      applier (restart-on-adopt or BridgingEngine dual-emit)
   metrics/           OTel + Prometheus instrumentation

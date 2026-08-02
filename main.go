@@ -274,7 +274,7 @@ func main() {
 	// User/consumer ingress is transaction-only. Privileged block/coinbase/
 	// subtree-data frames are dropped here; the miner multicast port is
 	// deprecated (2026-07-07). Blocks/subtrees enter only as BRC-144/BRC-143
-	// push frames on the commercial proxy's tunnel-bound ports, reframed to the
+	// push frames on the proxy's tunnel-bound push ports, reframed to the
 	// fabric — never accepted as multicast frames from a submitter.
 	userClass := forwarder.IngressTransaction
 	for i := range cfg.NumWorkers {

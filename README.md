@@ -74,16 +74,16 @@ With TCP ingress enabled:
 ./shard-proxy \
   -iface            eth0 \
   -udp-listen-port  8725 \
-  -tcp-listen-port  9100
+  -tcp-listen-port  8725
 ```
 
 Ingress is **transaction-only** at the component boundary: port 8725 accepts
 BRC-12/124/128 transactions (an anchor is an ordinary transaction). The old
 privileged **miner multicast port was deprecated (2026-07-07)** — blocks and
 subtrees are no longer submitted as multicast frames. They enter only as
-BRC-144 (block) / BRC-143 (subtree) push frames on the commercial proxy's
-tunnel-bound ports; multicast is fabric-internal transport. See the
-[design direction](https://github.com/lightwebinc/bsv-multicast/blob/main/multicast-skills/architecture.md).
+BRC-144 (block) / BRC-143 (subtree) push frames on the proxy's tunnel-bound
+push ports; multicast is fabric-internal transport. See the
+[design direction](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#ingress-authorization-miner-tier-gate).
 
 With Source-Specific Multicast (RFC 4607) — see [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm):
 

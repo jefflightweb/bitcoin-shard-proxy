@@ -440,7 +440,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.coalesceFlush, err = meter.Int64Counter("bsp_coalesce_flush_total",
-		metric.WithDescription("BRC-142 coalesce flushes by reason (batch, encode_error)")); err != nil {
+		metric.WithDescription("BRC-142 coalesce flushes by reason (batch, relay, encode_error)")); err != nil {
 		return nil, err
 	}
 	if r.coalesceMembersHisto, err = meter.Int64Histogram("bsp_coalesce_members_per_bundle",
@@ -521,7 +521,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 // PacketReceived records receipt of a raw datagram on the ingress socket.
 // Gatherer exposes the recorder's Prometheus registry so an embedding binary
-// (shard-proxy-1bsv) can merge the bsp_ family into its own /metrics endpoint
+// (a downstream embedding binary) can merge the bsp_ family into its own /metrics endpoint
 // instead of running Serve on a second port.
 func (r *Recorder) Gatherer() promclient.Gatherer { return r.promReg }
 
@@ -668,7 +668,7 @@ func (r *Recorder) BlockPoWRejected() {
 // BEEFSubmission records one BRC-148 submission-record admission outcome
 // (result: ok, malformed, oversize, bad_marker, multi_topic, disabled).
 // multi_topic = a record naming >1 topic, rejected by the OSS single-topic
-// admission gate (multi-topic is a commercial capability). Drives the
+// admission gate (multi-topic requires an authenticated submit policy). Drives the
 // ingress-abuse posture and the e2e admission assertions.
 func (r *Recorder) BEEFSubmission(result string) {
 	r.beefSubmissions.Add(context.Background(), 1, metric.WithAttributes(
