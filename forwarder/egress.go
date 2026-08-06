@@ -56,6 +56,16 @@ type Egress struct {
 	// loopback. See retrytee.go for why this exists and why it is batched.
 	tee *retryTee
 
+	// mirror, when non-nil, mirrors DATA datagrams to the co-located LISTENER over
+	// loopback (a second, independent tee). On a collapsed edge the listener never
+	// SSM-joins this node's OWN source (that would install an iif==oif mroute and
+	// storm), so own-source frames are not multicast-received locally; the mirror is
+	// the only path that delivers own-node frames to the co-located listener. It
+	// targets a DEDICATED loopback port the listener binds exclusively — NOT the
+	// retry cache's port, which the retry endpoint co-binds (unicast demux to a
+	// shared wildcard port is kernel-chosen, not controllable).
+	mirror *retryTee
+
 	// addrCache[i][groupIdx] is the per-target destination *net.UDPAddr
 	// (IP+Port+Zone) for a data frame in group groupIdx. The multicast
 	// address is a pure function of (mcPrefix, groupID, groupIdx, port) and
@@ -171,6 +181,36 @@ func (e *Egress) CloseRetryTee() error {
 	return e.tee.close()
 }
 
+// EnableLocalMirror mirrors egressed DATA datagrams to the co-located listener's
+// dedicated loopback ingest at addr (host:port, normally "[::1]:<mirror-port>", a
+// port the LISTENER binds exclusively — not the retry cache's). This is what
+// delivers own-node frames to a collapsed edge's own listener, which cannot
+// SSM-join its own source. Independent of EnableRetryTee (different target port).
+func (e *Egress) EnableLocalMirror(addr string, batchHint int) error {
+	t, err := newRetryTee(addr, batchHint)
+	if err != nil {
+		return err
+	}
+	e.mirror = t
+	return nil
+}
+
+// LocalMirrorFailed reports datagrams the mirror could not deliver (0 when disabled).
+func (e *Egress) LocalMirrorFailed() uint64 {
+	if e.mirror == nil {
+		return 0
+	}
+	return e.mirror.Failed()
+}
+
+// CloseLocalMirror releases the mirror socket.
+func (e *Egress) CloseLocalMirror() error {
+	if e.mirror == nil {
+		return nil
+	}
+	return e.mirror.close()
+}
+
 // PoolGet returns a fragment-sized buffer from the pool, or nil if
 // fragmentation is disabled on the forwarder. Caller passes the returned
 // pointer to EnqueueDataPooled/EnqueueControlPooled so the buffer is
@@ -242,6 +282,11 @@ func (e *Egress) enqueue(raw []byte, dst net.UDPAddr, m msgMeta, pooled *[]byte)
 	if e.tee != nil && isData {
 		e.tee.append(raw)
 	}
+	// Mirror to the co-located listener (own-node delivery). Same funnel + DATA-only
+	// as the retry tee, but a distinct target port the listener binds exclusively.
+	if e.mirror != nil && isData {
+		e.mirror.append(raw)
+	}
 	cacheable := isData && m.groupIdx < maxGroupCache
 	for i := range e.targets {
 		var addr *net.UDPAddr
@@ -295,6 +340,9 @@ func (e *Egress) FlushVia(fn EgressWriteFunc) {
 	if e.tee != nil {
 		e.tee.flush()
 	}
+	if e.mirror != nil {
+		e.mirror.flush()
+	}
 	for _, p := range e.pooledBufs {
 		e.pool.Put(p)
 	}
@@ -326,6 +374,9 @@ func (e *Egress) Flush() {
 	// and pooled buffers are still valid until the release below.
 	if e.tee != nil {
 		e.tee.flush()
+	}
+	if e.mirror != nil {
+		e.mirror.flush()
 	}
 	for _, p := range e.pooledBufs {
 		e.pool.Put(p)

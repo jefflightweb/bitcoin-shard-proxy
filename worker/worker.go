@@ -78,6 +78,9 @@ type Worker struct {
 	// retryTee, when set, mirrors egressed DATA datagrams to a co-located retry
 	// cache (loopback host:port). Empty = disabled.
 	retryTee string
+	// localMirror, when set, mirrors egressed DATA datagrams to the co-located
+	// LISTENER's dedicated ingest (loopback host:port). Empty = disabled.
+	localMirror string
 }
 
 // SetRetryTee enables mirroring of egressed DATA datagrams to a co-located retry
@@ -85,6 +88,12 @@ type Worker struct {
 // hosts its own retry cache (the collapsed edge): it cannot (S,G)-join its own
 // source, so without this its cache holds nothing of its own emissions.
 func (w *Worker) SetRetryTee(addr string) { w.retryTee = addr }
+
+// SetLocalMirror enables mirroring of egressed DATA datagrams to the co-located
+// LISTENER's dedicated loopback ingest. Same own-source rationale as SetRetryTee,
+// but delivers to the listener (own-node delivery) rather than the retry cache;
+// the address must be a port the listener binds exclusively.
+func (w *Worker) SetLocalMirror(addr string) { w.localMirror = addr }
 
 // New constructs a Worker. No sockets are opened until [Run] is called.
 //
@@ -238,6 +247,14 @@ func (w *Worker) Run(listenAddr string, listenPort int, done <-chan struct{}) er
 		} else {
 			w.log.Info("retry tee enabled", "addr", w.retryTee)
 			defer func() { _ = egr.CloseRetryTee() }()
+		}
+	}
+	if w.localMirror != "" {
+		if err := egr.EnableLocalMirror(w.localMirror, w.recvBatch); err != nil {
+			w.log.Error("local mirror disabled", "addr", w.localMirror, "err", err)
+		} else {
+			w.log.Info("local mirror enabled", "addr", w.localMirror)
+			defer func() { _ = egr.CloseLocalMirror() }()
 		}
 	}
 

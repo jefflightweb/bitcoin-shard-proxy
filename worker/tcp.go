@@ -56,11 +56,19 @@ type TCPIngress struct {
 	// every one of them — a tee wired only into the UDP worker silently misses
 	// everything submitted over this path.
 	retryTee string
+	// localMirror mirrors egressed DATA datagrams to the co-located LISTENER's
+	// dedicated ingest (own-node delivery). Like retryTee, must be set on EVERY
+	// ingress path's Egress.
+	localMirror string
 }
 
 // SetRetryTee enables mirroring of egressed DATA datagrams to a co-located retry
 // endpoint's cache-ingest address. See forwarder/retrytee.go.
 func (ti *TCPIngress) SetRetryTee(addr string) { ti.retryTee = addr }
+
+// SetLocalMirror enables mirroring of egressed DATA datagrams to the co-located
+// listener's dedicated loopback ingest (own-node delivery).
+func (ti *TCPIngress) SetLocalMirror(addr string) { ti.localMirror = addr }
 
 // NewTCPIngress constructs a TCPIngress. No sockets are opened until [Run] is
 // called.
@@ -169,6 +177,13 @@ func (ti *TCPIngress) Run(listenAddr string, listenPort int, done <-chan struct{
 					ti.log.Error("retry tee disabled", "addr", ti.retryTee, "err", err)
 				} else {
 					defer func() { _ = egr.CloseRetryTee() }()
+				}
+			}
+			if ti.localMirror != "" {
+				if err := egr.EnableLocalMirror(ti.localMirror, 1); err != nil {
+					ti.log.Error("local mirror disabled", "addr", ti.localMirror, "err", err)
+				} else {
+					defer func() { _ = egr.CloseLocalMirror() }()
 				}
 			}
 			defer ti.flushEgr(egr)
