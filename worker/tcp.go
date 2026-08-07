@@ -26,6 +26,7 @@ package worker
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/objfmt"
@@ -91,14 +93,37 @@ func (b *tcpBatcher) flush() {
 // enqueued-but-unsent across a header, payload, or objfmt read that has to
 // wait on the peer, including the partial-next-frame case where the buffer
 // is non-empty but short of a complete frame.
+//
+// When coalescing is on, linger > 0 turns the eager flush into a bounded
+// accumulate window: rather than flush the instant the buffer empties, give
+// same-flow frames up to linger to arrive so bundles pack denser (higher
+// members/bundle) on a fast network. A frame is delayed at most linger; under
+// sustained load the read returns immediately (no timeout) and the batch fills
+// to maxTCPBatch instead. The in-progress frame (if the buffer emptied
+// mid-frame) is not yet in the batch, so flushing on a linger timeout never
+// strands it — the blocking retry completes it.
 type flushingReader struct {
-	r io.Reader
-	b *tcpBatcher
+	conn   net.Conn
+	b      *tcpBatcher
+	linger time.Duration // >0 (coalesce only): accumulate window before flush
 }
 
 func (f *flushingReader) Read(p []byte) (int, error) {
+	if f.linger > 0 && f.b.pending > 0 {
+		_ = f.conn.SetReadDeadline(time.Now().Add(f.linger))
+		n, err := f.conn.Read(p)
+		_ = f.conn.SetReadDeadline(time.Time{}) // clear
+		var ne net.Error
+		if err != nil && errors.As(err, &ne) && ne.Timeout() {
+			// Window elapsed with no new frame: flush the accumulated batch,
+			// then block for the next frame (deadline cleared).
+			f.b.flush()
+			return f.conn.Read(p)
+		}
+		return n, err
+	}
 	f.b.flush()
-	return f.r.Read(p)
+	return f.conn.Read(p)
 }
 
 // TCPIngress listens for TCP connections carrying a stream of BRC-12, BRC-124, or BRC-128 frames
@@ -120,11 +145,20 @@ type TCPIngress struct {
 	// dedicated ingest (own-node delivery). Like retryTee, must be set on EVERY
 	// ingress path's Egress.
 	localMirror string
+	// coalesceLinger, when >0 AND coalescing is armed on a connection, is the
+	// bounded window a connection accumulates same-flow frames before flushing,
+	// trading up to this much added latency for denser bundles on a fast
+	// network. Ignored when coalescing is off (the latency-first eager flush).
+	coalesceLinger time.Duration
 }
 
 // SetRetryTee enables mirroring of egressed DATA datagrams to a co-located retry
 // endpoint's cache-ingest address. See forwarder/retrytee.go.
 func (ti *TCPIngress) SetRetryTee(addr string) { ti.retryTee = addr }
+
+// SetCoalesceLinger sets the bounded accumulate window used when coalescing is
+// on (see coalesceLinger). 0 keeps the latency-first eager flush.
+func (ti *TCPIngress) SetCoalesceLinger(d time.Duration) { ti.coalesceLinger = d }
 
 // SetLocalMirror enables mirroring of egressed DATA datagrams to the co-located
 // listener's dedicated loopback ingest (own-node delivery).
@@ -369,7 +403,13 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 	// maxTCPBatch accumulates or — via flushingReader — before any read that
 	// would block on the kernel. See tcpBatcher for the rationale.
 	bat := &tcpBatcher{ti: ti, egr: egr}
-	br := bufio.NewReaderSize(&flushingReader{r: conn, b: bat}, tcpBufSize)
+	// Linger only when coalescing is actually armed on this connection's Egress
+	// — the plain reliable lane keeps the latency-first eager flush.
+	linger := time.Duration(0)
+	if egr != nil && egr.CoalArmed() {
+		linger = ti.coalesceLinger
+	}
+	br := bufio.NewReaderSize(&flushingReader{conn: conn, b: bat, linger: linger}, tcpBufSize)
 	hdrBuf := make([]byte, frame.HeaderSize)
 
 	// Grammar detection (once per connection), 3-way per BRC-148: a framed

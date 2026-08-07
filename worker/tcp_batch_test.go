@@ -240,3 +240,68 @@ func TestTCPCoalesce_PacksSameFlowNoLoss(t *testing.T) {
 		t.Fatalf("recovered %d members across %d bundles, want %d (member loss/strand)", members, len(sunk), n)
 	}
 }
+
+// The coalesce linger packs frames that arrive as SEPARATE writes (the
+// subtx-gen-style one-tx-per-segment pattern that otherwise yields ~1-member
+// bundles) by holding the batch open up to the linger window — trading a
+// bounded latency for density on a fast network. Same-flow, arrivals within
+// the window => one packed batch, not N singleton bundles.
+func TestTCPCoalesceLinger_PacksAcrossSeparateWrites(t *testing.T) {
+	engine := shard.New(0xFF05, shard.DefaultGroupID, 0) // single group => one flow
+	fwd := forwarder.New(engine, 0xFF05, shard.DefaultGroupID, 9001, false, nil)
+	fwd.SetCoalesce(true, 9000, 0, false)
+	fwd.SetRequireEF(false)
+	ti := NewTCPIngress(fwd, []*net.Interface{{Index: 1, Name: "lo"}}, nil)
+	ti.SetCoalesceLinger(100 * time.Millisecond) // >> the inter-write gap below
+	var sunk [][]byte
+	ti.SetFlushVia(func(_ int, raw []byte, _ *net.UDPAddr) error {
+		sunk = append(sunk, append([]byte(nil), raw...))
+		return nil
+	}, nil)
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1")})
+	if err != nil {
+		t.Fatalf("loopback: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	egr := forwarder.NewEgress(fwd, []forwarder.Target{{Iface: &net.Interface{Index: 1, Name: "lo"}, Conn: conn}}, maxTCPBatch, nil)
+
+	const n = 30
+	srv, cli := net.Pipe()
+	done := make(chan struct{})
+	go func() { ti.handleConn(srv, egr); ti.flushEgr(egr); close(done) }()
+	go func() {
+		for i := 0; i < n; i++ {
+			if _, err := cli.Write(encodeTestTx(t, byte(i))); err != nil {
+				return
+			}
+			time.Sleep(1 * time.Millisecond) // << the 100ms linger
+		}
+		_ = cli.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handleConn hang")
+	}
+
+	members := 0
+	for i, d := range sunk {
+		if !frame.IsBundle(d) {
+			t.Fatalf("datagram %d not a bundle", i)
+		}
+		b, err := bundle.Decode(d)
+		if err != nil {
+			t.Fatalf("bundle %d decode: %v", i, err)
+		}
+		members += len(b.Members)
+	}
+	if members != n {
+		t.Fatalf("recovered %d members, want %d (loss)", members, n)
+	}
+	// Density: the linger must have packed the separate writes well below the
+	// singleton-bundle count a no-linger frame-per-write would produce (== n).
+	if len(sunk) >= n/2 {
+		t.Fatalf("linger produced %d bundles for %d frame-per-write txns — not packing", len(sunk), n)
+	}
+	t.Logf("linger packed %d separate writes into %d bundles (R=%.1f)", n, len(sunk), float64(members)/float64(len(sunk)))
+}
