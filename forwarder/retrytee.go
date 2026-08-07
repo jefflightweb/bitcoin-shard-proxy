@@ -36,6 +36,11 @@ type retryTee struct {
 	msgs []ipv6.Message
 	log  *slog.Logger
 
+	// owned marks a tee that dialed its own socket (newRetryTee). A tee built
+	// over a shared TeeSocket (newSharedTee) does NOT own pc: close() leaves it
+	// open for the other Egresses sharing it — the TeeSocket's owner closes it.
+	owned bool
+
 	// failed counts datagrams the tee could not deliver. A tee failure must never
 	// affect real egress — the cache is an optimisation, the forward path is not —
 	// so errors are counted and logged once, never propagated.
@@ -43,10 +48,22 @@ type retryTee struct {
 	logged bool
 }
 
-// newRetryTee dials the local cache-ingest address. addr is host:port; the host
-// should be loopback ([::1]) — a tee to a non-local address would put a full
-// second copy of the stream on the wire.
-func newRetryTee(addr string, batchHint int) (*retryTee, error) {
+// TeeSocket is a shared tee/mirror socket: ONE loopback fd serving the tee
+// buffers of many Egresses. The TCP lane builds one Egress per accepted
+// connection; giving each its own tee socket cost two socket dials per accept
+// and collapsed under high connection counts (measured: part of the 64+-conn
+// stall). Appends stay per-Egress and lock-free; only the batched sendmmsg
+// serializes on the shared fd, at flush cadence. The x/net PacketConn write
+// path is goroutine-safe (per-fd write lock), so concurrent flushes are safe.
+type TeeSocket struct {
+	pc   *ipv6.PacketConn
+	addr *net.UDPAddr
+}
+
+// NewTeeSocket dials the local cache-ingest (or mirror-ingest) address. addr is
+// host:port; the host should be loopback ([::1]) — a tee to a non-local address
+// would put a full second copy of the stream on the wire.
+func NewTeeSocket(addr string) (*TeeSocket, error) {
 	ua, err := net.ResolveUDPAddr("udp6", addr)
 	if err != nil {
 		return nil, fmt.Errorf("retry tee: resolve %q: %w", addr, err)
@@ -61,12 +78,37 @@ func newRetryTee(addr string, batchHint int) (*retryTee, error) {
 	if err != nil {
 		return nil, fmt.Errorf("retry tee: listen: %w", err)
 	}
+	return &TeeSocket{pc: ipv6.NewPacketConn(c), addr: ua}, nil
+}
+
+// Close releases the shared socket. Call only after every Egress using it has
+// flushed its final batch.
+func (s *TeeSocket) Close() error { return s.pc.Close() }
+
+// newRetryTee dials a private socket for this tee (the original per-Egress
+// form, still used by the long-lived UDP worker egresses).
+func newRetryTee(addr string, batchHint int) (*retryTee, error) {
+	s, err := NewTeeSocket(addr)
+	if err != nil {
+		return nil, err
+	}
 	return &retryTee{
-		pc:   ipv6.NewPacketConn(c),
-		addr: ua,
+		pc:    s.pc,
+		addr:  s.addr,
+		owned: true,
+		msgs:  make([]ipv6.Message, 0, batchHint),
+		log:   slog.Default().With("component", "retry-tee"),
+	}, nil
+}
+
+// newSharedTee builds a tee buffer over an already-open shared TeeSocket.
+func newSharedTee(s *TeeSocket, batchHint int) *retryTee {
+	return &retryTee{
+		pc:   s.pc,
+		addr: s.addr,
 		msgs: make([]ipv6.Message, 0, batchHint),
 		log:  slog.Default().With("component", "retry-tee"),
-	}, nil
+	}
 }
 
 // append queues one copy. raw must stay valid until flush returns — the same
@@ -102,7 +144,8 @@ func (t *retryTee) flush() {
 func (t *retryTee) Failed() uint64 { return t.failed }
 
 func (t *retryTee) close() error {
-	if t.pc == nil {
+	if t.pc == nil || !t.owned {
+		// Shared TeeSocket: the owner (the listener that dialed it) closes it.
 		return nil
 	}
 	return t.pc.Close()

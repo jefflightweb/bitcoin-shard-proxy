@@ -36,9 +36,32 @@ import (
 // back to per-packet allocation (never hit in practice).
 const maxGroupCache = 1 << 13
 
+// addrCacheInit is the initial per-target addrCache length. Grown on demand in
+// enqueue (next power of two covering the seen groupIdx, capped at
+// maxGroupCache); 64 covers every real deployment's transaction-plane group
+// space without growth while keeping the per-Egress (per-TCP-connection)
+// allocation to half a KiB instead of maxGroupCache's 64 KiB.
+const addrCacheInit = 64
+
+// batchWriter is the sendmmsg seam: *ipv6.PacketConn in production, a fake in
+// tests that need to force partial/errored WriteBatch results (the reliable
+// lane's retry loop cannot be exercised against a healthy kernel socket).
+type batchWriter interface {
+	WriteBatch(ms []ipv6.Message, flags int) (int, error)
+}
+
 type Egress struct {
 	targets []Target
-	pcs     []*ipv6.PacketConn
+	pcs     []batchWriter
+
+	// reliable marks an Egress on the reliable (TCP) submission lane: Flush
+	// re-submits the unsent remainder of a partial WriteBatch instead of
+	// dropping it. The batched-cadence TCP path can queue up to a whole batch
+	// per flush; without the retry, one ENOBUFS burst would drop the entire
+	// batch where the old per-frame path lost at most one frame — a strict
+	// reliability regression on the lane whose contract is reliability. The
+	// lossy UDP lane keeps drop-and-count semantics (reliable=false).
+	reliable bool
 
 	// msgs[i] holds the queue of outbound datagrams for targets[i]. All
 	// queues grow in lock-step: every Enqueue appends one entry to every
@@ -113,7 +136,7 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 	}
 	e := &Egress{
 		targets:   targets,
-		pcs:       make([]*ipv6.PacketConn, len(targets)),
+		pcs:       make([]batchWriter, len(targets)),
 		msgs:      make([][]ipv6.Message, len(targets)),
 		meta:      make([]msgMeta, 0, batchHint),
 		addrCache: make([][]*net.UDPAddr, len(targets)),
@@ -128,7 +151,15 @@ func NewEgress(fw *Forwarder, targets []Target, batchHint int, rec *metrics.Reco
 			e.pcs[i] = ipv6.NewPacketConn(tgt.Conn)
 		}
 		e.msgs[i] = make([]ipv6.Message, 0, batchHint)
-		e.addrCache[i] = make([]*net.UDPAddr, maxGroupCache)
+		// Start the per-group destination cache SMALL and grow on demand (see
+		// enqueue). The old fixed maxGroupCache slab was 64 KiB of zeroed
+		// pointers per target per Egress — trivial for the handful of
+		// long-lived UDP worker egresses it was built for, but the TCP lane
+		// builds one Egress per accepted connection, and at high connection
+		// counts the per-accept slab churn was a measured contributor to the
+		// many-connection collapse. Real deployments use a handful of groups
+		// (shardBits 2 ⇒ 4), so the small start covers them without growing.
+		e.addrCache[i] = make([]*net.UDPAddr, addrCacheInit)
 	}
 	if fw != nil && fw.fragDataSize > 0 {
 		e.poolSize = frame.HeaderSizeV3 + fw.fragDataSize
@@ -164,6 +195,23 @@ func (e *Egress) EnableRetryTee(addr string, batchHint int) error {
 	e.tee = t
 	return nil
 }
+
+// EnableRetryTeeShared is EnableRetryTee over an already-open shared TeeSocket
+// (one fd serving many per-connection egresses — see TeeSocket). CloseRetryTee
+// on this Egress leaves the shared socket open; its owner closes it.
+func (e *Egress) EnableRetryTeeShared(s *TeeSocket, batchHint int) {
+	e.tee = newSharedTee(s, batchHint)
+}
+
+// EnableLocalMirrorShared is EnableLocalMirror over a shared TeeSocket.
+func (e *Egress) EnableLocalMirrorShared(s *TeeSocket, batchHint int) {
+	e.mirror = newSharedTee(s, batchHint)
+}
+
+// SetReliable marks this Egress as belonging to the reliable (TCP) submission
+// lane: Flush re-submits the unsent remainder of a partial WriteBatch instead
+// of dropping it (bounded — see Flush). Call before the first Enqueue.
+func (e *Egress) SetReliable(v bool) { e.reliable = v }
 
 // RetryTeeFailed reports datagrams the tee could not deliver (0 when disabled).
 func (e *Egress) RetryTeeFailed() uint64 {
@@ -291,6 +339,20 @@ func (e *Egress) enqueue(raw []byte, dst net.UDPAddr, m msgMeta, pooled *[]byte)
 	for i := range e.targets {
 		var addr *net.UDPAddr
 		if cacheable {
+			if int(m.groupIdx) >= len(e.addrCache[i]) {
+				// Grow to the next power of two covering groupIdx (≤ maxGroupCache).
+				// Rare: fires once per Egress per band above the small initial size.
+				n := len(e.addrCache[i]) * 2
+				for n <= int(m.groupIdx) {
+					n *= 2
+				}
+				if n > maxGroupCache {
+					n = maxGroupCache
+				}
+				grown := make([]*net.UDPAddr, n)
+				copy(grown, e.addrCache[i])
+				e.addrCache[i] = grown
+			}
 			if addr = e.addrCache[i][m.groupIdx]; addr == nil {
 				addr = &net.UDPAddr{IP: dst.IP, Port: dst.Port, Zone: e.targets[i].Iface.Name}
 				e.addrCache[i][m.groupIdx] = addr
@@ -317,16 +379,36 @@ type EgressWriteFunc func(target int, raw []byte, dst *net.UDPAddr) error
 // pipeline without forking it.
 func (e *Egress) FlushVia(fn EgressWriteFunc) {
 	for i := range e.targets {
+		msgs := e.msgs[i]
 		sent := 0
+		attempts := 0
 		var werr error
-		for j := range e.msgs[i] {
-			m := &e.msgs[i][j]
+		for sent < len(msgs) {
+			m := &msgs[sent]
 			dst, _ := m.Addr.(*net.UDPAddr)
-			if err := fn(i, m.Buffers[0], dst); err != nil {
+			err := fn(i, m.Buffers[0], dst)
+			if err == nil {
+				sent++
+				attempts = 0
+				continue
+			}
+			// Reliable lane (TCP submission): retry the SAME message with the
+			// bounded budget before surrendering the remainder. The batched
+			// cadence queues up to a whole batch per flush, and via-transports
+			// (e.g. the ingress→spine pipeline client) self-heal by re-dialing
+			// on the next Send — a first-error break here would turn one
+			// transient disconnect into a whole-batch-remainder loss where the
+			// old per-frame flush lost at most one frame. Non-reliable lanes
+			// keep the original first-error surrender.
+			if !e.reliable || attempts >= maxReliableRetries {
 				werr = err
 				break
 			}
-			sent++
+			attempts++
+			time.Sleep(reliableRetryBackoff)
+		}
+		if e.reliable && (werr != nil || sent < len(msgs)) {
+			e.logWriteError(i, len(msgs), sent, werr)
 		}
 		e.recordWrite(i, sent, werr)
 		clear(e.msgs[i])
@@ -350,14 +432,47 @@ func (e *Egress) FlushVia(fn EgressWriteFunc) {
 	e.meta = e.meta[:0]
 }
 
+// reliableRetryBackoff/maxReliableRetries bound the reliable lane's
+// zero-progress retry loop: ~50 × 200µs ⇒ at most ~10ms of in-line stall per
+// flush before the remainder is surrendered as write_error drops (logged +
+// counted; the retry tee holds the frames, so BRC-126 NACK repair is the
+// backstop). Unbounded blocking is not an option — a wedged NIC queue must
+// not hang the submission lane forever.
+const (
+	reliableRetryBackoff = 200 * time.Microsecond
+	maxReliableRetries   = 50
+)
+
+// isTransientSendErr reports whether a sendmmsg error is worth retrying:
+// kernel buffer/qdisc backpressure (ENOBUFS), a not-ready socket
+// (EAGAIN/EWOULDBLOCK — normally absorbed by the runtime poller, but surfaced
+// on some paths), or an interrupted syscall (EINTR).
+func isTransientSendErr(err error) bool {
+	return errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.EAGAIN) ||
+		errors.Is(err, syscall.EWOULDBLOCK) ||
+		errors.Is(err, syscall.EINTR)
+}
+
 // Flush writes all queued messages to each target via WriteBatch (sendmmsg
 // on Linux; per-packet fallback elsewhere). Per-target write errors are
 // recorded as EgressError; messages beyond WriteBatch's sent-count fire
 // PacketDropped with reason "write_error". Pool buffers are released exactly
 // once each before return.
+//
+// A reliable Egress (SetReliable — the TCP submission lane) re-submits the
+// unsent remainder of a partial WriteBatch instead of dropping it: the
+// batched-cadence TCP path queues up to a whole batch per flush, and a single
+// ENOBUFS burst would otherwise drop the lot where the old per-frame path
+// lost at most one frame. Zero-progress retries are bounded (see
+// maxReliableRetries) so a wedged socket cannot hang the lane.
 func (e *Egress) Flush() {
 	for i := range e.targets {
 		if len(e.msgs[i]) == 0 {
+			continue
+		}
+		if e.reliable {
+			e.flushReliable(i)
 			continue
 		}
 		sent, err := e.pcs[i].WriteBatch(e.msgs[i], 0)
@@ -383,6 +498,51 @@ func (e *Egress) Flush() {
 	}
 	e.pooledBufs = e.pooledBufs[:0]
 	e.meta = e.meta[:0]
+}
+
+// flushReliable drains target i re-submitting the unsent remainder of every
+// partial WriteBatch. Progress resets the retry budget; zero-progress
+// transient errors back off briefly and retry up to maxReliableRetries, after
+// which (or on any hard error) the remainder is surrendered to the normal
+// write_error accounting.
+func (e *Egress) flushReliable(i int) {
+	msgs := e.msgs[i]
+	off := 0
+	attempts := 0
+	var werr error
+	for off < len(msgs) {
+		sent, err := e.pcs[i].WriteBatch(msgs[off:], 0)
+		if sent > 0 {
+			off += sent
+			attempts = 0
+			if off >= len(msgs) {
+				break
+			}
+			if err == nil {
+				continue // partial progress, no error: re-submit immediately
+			}
+		}
+		if err != nil && !isTransientSendErr(err) {
+			werr = err // hard error: surrender the remainder
+			break
+		}
+		// Zero progress on a transient (or nil) result: bounded backoff.
+		if attempts >= maxReliableRetries {
+			werr = err
+			if werr == nil {
+				werr = errors.New("egress: WriteBatch made no progress")
+			}
+			break
+		}
+		attempts++
+		time.Sleep(reliableRetryBackoff)
+	}
+	if werr != nil || off < len(msgs) {
+		e.logWriteError(i, len(msgs), off, werr)
+	}
+	e.recordWrite(i, off, werr)
+	clear(e.msgs[i])
+	e.msgs[i] = e.msgs[i][:0]
 }
 
 // logWriteError emits a category-8 (OS/NIC) log for a WriteBatch failure,

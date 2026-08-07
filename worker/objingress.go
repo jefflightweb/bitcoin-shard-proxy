@@ -154,9 +154,17 @@ func (oi *ObjectIngress) Run(listenAddr string, listenPort int, done <-chan stru
 		connWG.Add(1)
 		go func() {
 			defer connWG.Done()
+			// Per-connection exit for the shutdown watcher (see tcp.go): a bare
+			// <-done watcher leaks a goroutine + conn reference per historical
+			// connection until listener shutdown.
+			stop := make(chan struct{})
+			defer close(stop)
 			go func() {
-				<-done
-				_ = conn.Close()
+				select {
+				case <-done:
+					_ = conn.Close()
+				case <-stop:
+				}
 			}()
 			// Per-connection Egress so the shared multicast sockets are not
 			// mutated concurrently across goroutines; flush per object to keep

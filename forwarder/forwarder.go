@@ -603,6 +603,18 @@ func (fw *Forwarder) DispatchClass(egr *Egress, raw []byte, src net.Addr, worker
 // needs a UTXO lookup, a wallet/submitter concern, not a fabric one). A bare tx
 // is inherently transaction-class, so it composes with the miner-tier gate for
 // free — no privileged (block/subtree/coinbase) frame can be expressed here.
+// DispatchBareTx admits a transaction on a connection that has ALREADY
+// committed to the bare grammar, WITHOUT the leading-magic sniff DispatchClass
+// does. A bare stream reader (objfmt.ClassTx) validates structure but not the
+// version bytes, so a crafted tx whose first 4 bytes equal the BSV magic would,
+// through DispatchClass, misroute to the framed relay path and be enqueued
+// VERBATIM — aliasing the reader's reused window, which under batched egress is
+// overwritten before flush. The bare lane must never magic-route; this copies
+// into a fresh frame (via dispatchBareTx) so the enqueued bytes are stable.
+func (fw *Forwarder) DispatchBareTx(egr *Egress, tx []byte, src net.Addr, workerID int) {
+	fw.dispatchBareTx(egr, tx, src, workerID)
+}
+
 func (fw *Forwarder) dispatchBareTx(egr *Egress, tx []byte, src net.Addr, workerID int) {
 	iface := ""
 	if egr != nil && len(egr.targets) > 0 {
