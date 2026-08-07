@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/shard"
+	"github.com/lightwebinc/shard-proxy/forwarder"
 )
 
 // captureSink collects FlushVia output under a lock so tests can observe
@@ -169,5 +172,71 @@ func TestTCPControlFramesInOneBatchDoNotAlias(t *testing.T) {
 	if frames[0][50] != 0xAA || frames[1][50] != 0xBB {
 		t.Fatalf("control frames aliased: got tags 0x%02X 0x%02X, want 0xAA 0xBB",
 			frames[0][50], frames[1][50])
+	}
+}
+
+// With -coalesce ON, the batched TCP lane packs same-flow txns into BRC-142
+// bundle datagrams (fewer egress packets — the fabric-fanout/softirq relief)
+// with ZERO member loss, and drains via flushEgr->FlushCoalesced on close (no
+// stranding — the hazard the old per-frame path could never satisfy).
+func TestTCPCoalesce_PacksSameFlowNoLoss(t *testing.T) {
+	// shard-bits 0 => a single group, so every tx lands in one (group,subtree)
+	// flow and is eligible to pack together.
+	engine := shard.New(0xFF05, shard.DefaultGroupID, 0)
+	fwd := forwarder.New(engine, 0xFF05, shard.DefaultGroupID, 9001, false, nil)
+	fwd.SetCoalesce(true, 9000, 0, false)
+	fwd.SetRequireEF(false)
+	ti := NewTCPIngress(fwd, []*net.Interface{{Index: 1, Name: "lo"}}, nil)
+	var sunk [][]byte
+	ti.SetFlushVia(func(_ int, raw []byte, _ *net.UDPAddr) error {
+		sunk = append(sunk, append([]byte(nil), raw...))
+		return nil
+	}, nil)
+
+	// coal is armed only at batchHint>1 (the real accept loop uses maxTCPBatch).
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1")})
+	if err != nil {
+		t.Fatalf("loopback: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	egr := forwarder.NewEgress(fwd, []forwarder.Target{{Iface: &net.Interface{Index: 1, Name: "lo"}, Conn: conn}}, maxTCPBatch, nil)
+
+	const n = 40
+	srv, cli := net.Pipe()
+	done := make(chan struct{})
+	go func() { ti.handleConn(srv, egr); ti.flushEgr(egr); close(done) }()
+	// One segment carrying all txns: they buffer together so the batch
+	// accumulates before flushingReader drains it (net.Pipe delivers one Write
+	// as one read; a frame-per-Write would give 1-member bundles — the
+	// documented "coalescing only packs when the batch FILLS" behaviour).
+	var stream []byte
+	for i := 0; i < n; i++ {
+		stream = append(stream, encodeTestTx(t, byte(i))...)
+	}
+	go func() { _, _ = cli.Write(stream); _ = cli.Close() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConn hang")
+	}
+
+	// Fewer egress datagrams than txns (packing happened), every one a bundle,
+	// and the member count sums to exactly n (no member stranded or lost).
+	if len(sunk) == 0 || len(sunk) >= n {
+		t.Fatalf("egressed %d datagrams for %d txns — expected fewer (bundling)", len(sunk), n)
+	}
+	members := 0
+	for i, d := range sunk {
+		if !frame.IsBundle(d) {
+			t.Fatalf("datagram %d is not a BRC-142 bundle (ver 0x%02x)", i, d[6])
+		}
+		b, err := bundle.Decode(d)
+		if err != nil {
+			t.Fatalf("bundle %d decode: %v", i, err)
+		}
+		members += len(b.Members)
+	}
+	if members != n {
+		t.Fatalf("recovered %d members across %d bundles, want %d (member loss/strand)", members, len(sunk), n)
 	}
 }

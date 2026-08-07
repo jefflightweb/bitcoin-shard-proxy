@@ -164,6 +164,16 @@ func (ti *TCPIngress) flushEgr(egr *forwarder.Egress) {
 	if egr == nil {
 		return
 	}
+	// Drain the BRC-142 coalescing buffer into bundle datagrams BEFORE the
+	// egress flush. No-op unless -coalesce is on AND this Egress has a coal
+	// buffer (batchHint>1). This is what makes coalescing SAFE on the reliable
+	// TCP lane: the old per-frame path never called FlushCoalesced (members
+	// stranded — the documented loss hazard), but the batched cadence funnels
+	// EVERY flush path (batcher, flushingReader-before-blocking-read, tail
+	// defer) through here, so no member is ever left un-bundled across a read
+	// or on close. Bundles cut the fabric fan-out + GRE-encap packet rate ~R×,
+	// relieving the small single-queue VM's softirq ceiling.
+	ti.fwd.FlushCoalesced(egr, -1)
 	if ti.via != nil {
 		egr.FlushVia(ti.via)
 		if ti.viaFlush != nil {
@@ -310,11 +320,14 @@ func (ti *TCPIngress) Run(listenAddr string, listenPort int, done <-chan struct{
 				}
 			}()
 			// Each connection owns its own Egress (single-goroutine contract);
-			// the SOCKETS under it come from the pool slot. batchHint stays 1:
-			// the BRC-142 coalescer is gated on batchHint > 1 and must stay
-			// nil here — the TCP path never calls FlushCoalesced, and enabling
-			// it would strand members (the documented silent-loss hazard).
-			// Batching happens by flush CADENCE (tcpBatcher), not by hint.
+			// the SOCKETS under it come from the pool slot. batchHint =
+			// maxTCPBatch sizes the per-batch queues AND arms the BRC-142
+			// coalescer (NewEgress gates coal on `fw.coalesce && batchHint>1`).
+			// With -coalesce OFF (fw.coalesce=false) coal stays nil and this is
+			// byte-for-byte the plain batched egress; with it ON, coal is
+			// drained safely via flushEgr->FlushCoalesced on EVERY flush path —
+			// the batched cadence is what removes the old TCP+coalescing
+			// member-stranding hazard.
 			// Same-source ordering note: proxy-stamped SeqNums are keyed by
 			// (source IP, group, subtree) with no port, so two connections from
 			// ONE submitter IP share a per-flow counter. Under batched cadence,
@@ -328,7 +341,7 @@ func (ti *TCPIngress) Run(listenAddr string, listenPort int, done <-chan struct{
 			// needs strict on-wire ordering uses one connection (per-connection
 			// order is always preserved).
 			slot := int(connSeq.Add(1)-1) % poolN
-			egr := forwarder.NewEgress(ti.fwd, pools[slot], 1, ti.rec)
+			egr := forwarder.NewEgress(ti.fwd, pools[slot], maxTCPBatch, ti.rec)
 			egr.SetReliable(true)
 			if teeSocks != nil {
 				egr.EnableRetryTeeShared(teeSocks[slot], maxTCPBatch)

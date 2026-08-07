@@ -208,6 +208,10 @@ func (e *Egress) EnableLocalMirrorShared(s *TeeSocket, batchHint int) {
 	e.mirror = newSharedTee(s, batchHint)
 }
 
+// CoalArmed reports whether this Egress has a BRC-142 coalescing buffer (i.e.
+// -coalesce is on and it was built with batchHint>1). Observability/tests.
+func (e *Egress) CoalArmed() bool { return e.coal != nil }
+
 // SetReliable marks this Egress as belonging to the reliable (TCP) submission
 // lane: Flush re-submits the unsent remainder of a partial WriteBatch instead
 // of dropping it (bounded — see Flush). Call before the first Enqueue.
