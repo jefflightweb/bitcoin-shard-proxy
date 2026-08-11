@@ -90,15 +90,18 @@ func main() {
 	case "image":
 		fail(p.image(ctx, *address, *export))
 	case "all":
-		for name, step := range map[string]func(context.Context) error{
-			"tidy":  p.tidy,
-			"lint":  p.lint,
-			"vuln":  p.vuln,
-			"unit":  p.unit,
-			"build": p.build,
+		for _, step := range []struct {
+			name string
+			run  func(context.Context) error
+		}{
+			{"tidy", p.tidy},
+			{"lint", p.lint},
+			{"vuln", p.vuln},
+			{"unit", p.unit},
+			{"build", p.build},
 		} {
-			fmt.Fprintf(os.Stderr, "==> %s\n", name)
-			fail(step(ctx))
+			fmt.Fprintf(os.Stderr, "==> %s\n", step.name)
+			fail(step.run(ctx))
 		}
 		fmt.Fprintln(os.Stderr, "==> image")
 		fail(p.image(ctx, "", ""))
