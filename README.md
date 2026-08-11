@@ -4,7 +4,6 @@
 [![CodeQL](https://github.com/lightwebinc/shard-proxy/actions/workflows/codeql.yml/badge.svg)](https://github.com/lightwebinc/shard-proxy/actions/workflows/codeql.yml)
 [![Release](https://img.shields.io/github/v/release/lightwebinc/shard-proxy)](https://github.com/lightwebinc/shard-proxy/releases)
 [![Go Reference](https://pkg.go.dev/badge/github.com/lightwebinc/shard-proxy.svg)](https://pkg.go.dev/github.com/lightwebinc/shard-proxy)
-[![Go Report Card](https://goreportcard.com/badge/github.com/lightwebinc/shard-proxy)](https://goreportcard.com/report/github.com/lightwebinc/shard-proxy)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 > Part of the [**BSV Layered Multicast**](https://github.com/lightwebinc/bsv-multicast) open-source project — see the main repository for the full architecture, design docs, and BRC specifications.
