@@ -281,3 +281,43 @@ func TestProcess_FragDisabled_LargePayload_NotSplit(t *testing.T) {
 		t.Errorf("FrameVer changed from 0x%02X to 0x%02X with fragmentation disabled", origVer, raw[6])
 	}
 }
+
+// TestFragNoDatagramExceedsPathMTU is the delivery invariant BRC-130 exists to
+// hold: with fragmentation enabled at the path MTU, NO emitted datagram may exceed
+// that MTU. Violating it does not degrade delivery, it ends it — an oversize
+// datagram can only cross the fabric via IPv6 IP-layer fragmentation, which
+// multicast paths drop, and the sender sees no error at all.
+//
+// The regression this guards: with fragmentation off, a BRC-124 frame occupies
+// 40 (IPv6) + 8 (UDP) + 92 (header) + payload, so everything above mtu-140 (1360
+// at 1500) went out oversize and vanished. The sweep straddles that old cliff.
+func TestFragNoDatagramExceedsPathMTU(t *testing.T) {
+	const pathMTU = 1400 // ip6gre inner MTU on a 1500 underlay — the fabric's real limit
+	fw := makeFragForwarder(pathMTU)
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1")})
+	if err != nil {
+		t.Skipf("no udp6 socket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	egr := NewEgress(fw, []Target{{Iface: &net.Interface{Index: 1, Name: "lo"}, Conn: conn}}, 32, nil)
+	src := &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1}
+
+	// Straddle the old unfragmented cliff (mtu-140) and run well past it into
+	// subtree/block territory, which is always far above it.
+	for _, payLen := range []int{1, 1259, 1260, 1261, 1360, 1361, 4096, 65536} {
+		var emitted int
+		fw.Dispatch(egr, buildV2Frame(t, 0x10, 0, make([]byte, payLen)), src, 0)
+		egr.FlushVia(func(_ int, b []byte, _ *net.UDPAddr) error {
+			emitted++
+			if wire := 40 + 8 + len(b); wire > pathMTU {
+				t.Errorf("payload=%d emitted a %d-byte datagram (%d on the wire) > path MTU %d: "+
+					"needs IPv6 IP-layer fragmentation and will be dropped by the fabric",
+					payLen, len(b), wire, pathMTU)
+			}
+			return nil
+		})
+		if emitted == 0 {
+			t.Errorf("payload=%d emitted no datagrams at all", payLen)
+		}
+	}
+}

@@ -424,3 +424,32 @@ func TestLoadRejectsUnknownSourceMode(t *testing.T) {
 // boundary and blocks/subtrees enter only as BRC-143/BRC-144 push frames on the
 // proxy's tunnel-bound push ports. The former -miner-listen-port /
 // -miner-tcp-listen-port / -tx-accept-privileged flags and their tests are gone.
+
+// TestLoadFragMTUDefaultsOn pins BRC-130 fragmentation ON by default. It shipped
+// defaulted to 0, which is not "frames sent unfragmented" — it is a hard, silent
+// payload ceiling of (mtu-140) bytes: 1360 at MTU 1500. Above it a frame becomes a
+// single oversize datagram that can only cross the fabric via IPv6 IP-layer
+// fragmentation, the exact failure BRC-130 exists to prevent. Every subtree and
+// block frame is larger than that, so those lanes went 100% dark with no error on
+// either side. Do not restore a 0 default.
+func TestLoadFragMTUDefaultsOn(t *testing.T) {
+	cfg, err := parseArgs(t, []string{"-iface", realIface(t)})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.FragMTU != 1500 {
+		t.Errorf("FragMTU = %d, want 1500 (fragmentation must default ON)", cfg.FragMTU)
+	}
+}
+
+// TestLoadFragMTUExplicitZeroDisables keeps the opt-out working: an operator on a
+// fabric that genuinely cannot fragment must still be able to turn it off.
+func TestLoadFragMTUExplicitZeroDisables(t *testing.T) {
+	cfg, err := parseArgs(t, []string{"-iface", realIface(t), "-frag-mtu", "0"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.FragMTU != 0 {
+		t.Errorf("FragMTU = %d, want 0 when explicitly disabled", cfg.FragMTU)
+	}
+}

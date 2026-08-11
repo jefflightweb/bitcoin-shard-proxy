@@ -198,7 +198,17 @@ func main() {
 	}
 	if cfg.FragMTU > 0 {
 		fwd.SetFragMTU(cfg.FragMTU)
-		slog.Info("BRC-130 fragmentation enabled", "frag_mtu", cfg.FragMTU)
+		slog.Info("BRC-130 fragmentation enabled", "frag_mtu", cfg.FragMTU,
+			"max_unfragmented_payload", cfg.FragMTU-140)
+	} else {
+		// Explicitly disabled. This is not "no fragmentation" — it is a hard
+		// payload ceiling of MTU-140 bytes (1360 at 1500), above which frames
+		// become oversize datagrams the fabric cannot carry. Every subtree and
+		// block frame is above it. Loud on purpose: this state is silent on the
+		// wire (senders see a healthy TCP connection and no error).
+		slog.Warn("BRC-130 fragmentation DISABLED (-frag-mtu=0): payloads above ~1360B " +
+			"will be emitted as oversize datagrams and dropped by the fabric; " +
+			"subtree and block lanes cannot work")
 	}
 	if cfg.Coalesce {
 		fwd.SetCoalesce(true, cfg.CoalesceMaxBytes, cfg.CoalesceMaxMembers, cfg.CoalesceCarryTxid)

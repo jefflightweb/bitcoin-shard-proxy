@@ -101,8 +101,18 @@ type Config struct {
 	// FragMTU is the path MTU used to derive the fragment data size per
 	// datagram (fragDataSize = FragMTU - 40 - 8 - 104). Frames whose payload
 	// exceeds fragDataSize are split into BRC-130 fragment datagrams.
-	// 0 disables fragmentation (frames are forwarded verbatim regardless of size).
-	// Typical value: 1500 (Ethernet), 9000 (jumbo frames).
+	//
+	// ON by default at the Ethernet baseline. Disabling it does NOT make large
+	// frames "unfragmented" — it makes them UNDELIVERABLE: an unfragmented
+	// BRC-124 frame occupies 40 (IPv6) + 8 (UDP) + 92 (header) + payload, so a
+	// payload over MTU-140 becomes a single oversize datagram that can only
+	// cross the fabric via IPv6 IP-layer fragmentation, which is exactly what
+	// BRC-130 exists to avoid. At MTU 1500 that cliff is 1360 payload bytes,
+	// below every subtree and block frame, so those lanes go 100% dark.
+	//
+	// Set it to the smallest MTU on the egress path, NOT the local NIC's: on a
+	// tunnelled fabric that is the ip6gre inner MTU (underlay - 100), not 1500.
+	// 0 disables fragmentation (frames forwarded verbatim regardless of size).
 	FragMTU int
 
 	// Coalescing (BRC-142 bundle frame)
@@ -240,8 +250,8 @@ func Load() (*Config, error) {
 		"distributed-trace head sampling ratio 0..1 (0 = tracing off; exports via -otlp-endpoint)")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing ingress sockets; /readyz returns 503 during this window (0 = disabled)")
-	flag.IntVar(&c.FragMTU, "frag-mtu", envInt("FRAG_MTU", 0),
-		"path MTU for BRC-130 fragmentation (0 = disabled; typical: 1500 for Ethernet, 9000 for jumbo)")
+	flag.IntVar(&c.FragMTU, "frag-mtu", envInt("FRAG_MTU", 1500),
+		"path MTU for BRC-130 fragmentation; default 1500 (Ethernet baseline). Set to the SMALLEST MTU on the egress path — on a tunnelled fabric that is the ip6gre inner MTU (underlay-100), not the local NIC. 0 = disabled, which strands every payload above MTU-140 (1360 at 1500) as an undeliverable oversize datagram")
 	flag.BoolVar(&c.Coalesce, "coalesce", envBool("COALESCE", false),
 		"opt-in BRC-142 frame coalescing (pack many small same-(group,subtree) tx per datagram to cut pps)")
 	flag.IntVar(&c.CoalesceMaxBytes, "coalesce-max-bytes", envInt("COALESCE_MAX_BYTES", 1500),
