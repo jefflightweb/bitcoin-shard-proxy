@@ -4,7 +4,7 @@
 # Final image: distroless/static:nonroot, no in-image ENV defaults
 # (configure via Helm values.yaml or container env at runtime).
 
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 
