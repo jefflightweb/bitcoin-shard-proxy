@@ -1,6 +1,6 @@
 module github.com/lightwebinc/shard-proxy
 
-go 1.26.6
+go 1.26.2
 
 require (
 	github.com/lightwebinc/shard-common v0.19.1
