@@ -35,7 +35,7 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-log-format` | `LOG_FORMAT` | `text` | Log output format: `text` (stderr, dev default) or `json` (stdout, for fleet aggregation). See [Unified Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) |
 | `-log-level` | `LOG_LEVEL` | `info` | Log level: `debug` \| `info` \| `warn` \| `error`. Runtime-togglable via `POST /loglevel?level=` and SIGHUP. `-debug` is a deprecated alias for `debug` |
 | `-trace-sampling` | `TRACE_SAMPLING` | `0` | Distributed-trace head sampling ratio `0`–`1` (`0` = tracing off, no-op tracer; exports via `-otlp-endpoint`; control-plane only, never the packet hot path) |
-| `-frag-mtu` | `FRAG_MTU` | `0` | Path MTU for BRC-130 fragmentation (0 = disabled) |
+| `-frag-mtu` | `FRAG_MTU` | `1500` | Path MTU for BRC-130 fragmentation; default 1500 (Ethernet baseline). Set to the **smallest** MTU on the egress path — on a tunnelled fabric that is the tunnel inner MTU, not the local NIC. `0` = disabled, which strands every payload above MTU−140 (1360 at 1500) as an undeliverable oversize datagram |
 | `-coalesce` | `COALESCE` | `false` | Opt-in BRC-142 origin-side frame coalescing (pack many small same-`(group, subtree)` tx per datagram to cut egress pps). See [BRC-142 Coalescing](#brc-142-coalescing-origin-side) |
 | `-coalesce-max-bytes` | `COALESCE_MAX_BYTES` | `1500` | Max coalesced bundle datagram size in bytes (1500 = Ethernet MTU baseline; 9000 for jumbo on a controlled underlay) |
 | `-coalesce-max-members` | `COALESCE_MAX_MEMBERS` | `0` | Max member transactions per bundle (`0` = MTU-bound only) |
@@ -498,7 +498,7 @@ Local floor on the bridging duration. `0` ⇒ honour the pilot's
 
 ## Helm chart
 
-Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
+Flags are exposed under `.config` in the corresponding Helm chart's `values.yaml` — see the chart README for the covered set. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
 Chart: [`lightwebinc/shard-proxy-helm`](https://github.com/lightwebinc/shard-proxy-helm)
 

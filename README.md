@@ -154,9 +154,9 @@ A Kubernetes Helm chart is published from a dedicated chart repository:
   helm repo add bsp https://lightwebinc.github.io/shard-proxy-helm
   helm install proxy bsp/shard-proxy
   ```
-- OCI: `helm install proxy oci://ghcr.io/lightwebinc/charts/shard-proxy --version 0.5.0`
+- OCI: `helm install proxy oci://ghcr.io/lightwebinc/charts/shard-proxy`
 
-Every flag accepted by this binary is exposed under `.config` in the chart's `values.yaml`. See the chart README for the full reference and `values.schema.json` for validation rules.
+Flags are exposed under `.config` in the chart's `values.yaml` — see the chart README for the covered set and `values.schema.json` for validation rules.
 
 ## License
 

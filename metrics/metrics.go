@@ -647,8 +647,9 @@ func (r *Recorder) FrameFragmented(workerID int, k int) {
 }
 
 // CoalesceFlushed records one flushed BRC-142 bundle of n member transactions.
-// reason is "batch" (the normal per-batch flush) or "encode_error". Cold path
-// (fires once per bundle, not per frame), so it uses OTel like FrameFragmented.
+// reason is "batch" (per-batch origin flush), "relay" (verbatim spine re-emit
+// via ProcessBundle), or "encode_error". Cold path (fires once per bundle, not
+// per frame), so it uses OTel like FrameFragmented.
 func (r *Recorder) CoalesceFlushed(iface string, workerID, n int, reason string) {
 	ctx := context.Background()
 	opt := metric.WithAttributes(

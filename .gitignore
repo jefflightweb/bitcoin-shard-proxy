@@ -37,6 +37,7 @@ go.work.sum
 /recv-test-frames
 /perf-test
 /benchmark
+/ci/ci
 
 # Generated perf-test reports (stored in multicast-test/testing/)
 /report-*.md

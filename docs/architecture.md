@@ -2,20 +2,25 @@
 
 ## Overview
 
-shard-proxy receives BSV transaction frames (BRC-12, BRC-124, BRC-128, BRC-131,
-BRC-132, or BRC-134) over UDP (and optionally TCP), derives a deterministic multicast group
-address from each transaction's txid (or routes to a fixed control-plane group for
-BRC-131/BRC-132/BRC-134), then retransmits the original bytes verbatim to all configured
-egress interfaces.
+shard-proxy receives BSV transaction frames (BRC-12, BRC-124, BRC-128, or
+BRC-134) over UDP (and optionally TCP), derives a deterministic multicast group
+address from each transaction's txid (or routes to a fixed control-plane group
+for BRC-134 anchors), then retransmits the original bytes verbatim to all
+configured egress interfaces. Block (BRC-131) and subtree-data (BRC-132) frames
+never enter through the public ingress — those sockets are transaction-class
+and drop them (`bsp_privileged_frame_rejected_total`). They originate from the
+privileged BRC-143/144 push lanes (`-subtree-listen-port` / `-block-listen-port`),
+which reframe push objects into BRC-132/BRC-131 before the same forwarder
+pipeline routes them to the control groups.
 
 BRC wire formats live in
 [bsv-multicast/docs/](https://github.com/lightwebinc/bsv-multicast/tree/main/docs).
 
 ```text
-sender  ──UDP/TCP──►  shard-proxy  ──UDP multicast──►  FF05::B:<shard>  (data plane, configurable scope)
-                      (forwarder pipeline) ├─────────────────►  FF0E::B:FFFE     (GroupBlockBroadcast, BRC-131/134, always global)
-                                           ├─────────────────►  FF05::B:FFFB     (GroupSubtreeDataAnnounce, BRC-132)
-                                           └─────────────────►  FF05::B:FFFC     (GroupSubtreeGroupAnnounce, BRC-127)
+tx sender ──UDP/TCP (8725)──────►  shard-proxy  ──UDP multicast──►  FF05::B:<shard>  (data plane, configurable scope)
+miner ──push lanes (8726/8727)──►  (forwarder pipeline) ├────────►  FF0E::B:FFFE     (GroupBlockBroadcast, BRC-131/134, always global)
+                                                        ├────────►  FF05::B:FFFB     (GroupSubtreeDataAnnounce, BRC-132)
+                                                        └────────►  FF05::B:FFFC     (GroupSubtreeGroupAnnounce, BRC-127)
 ```
 
 ## Shard Address Derivation
@@ -69,8 +74,12 @@ user shard indices never overlap the control groups (`0xFFFA`–`0xFFFE`).
 
 ## BRC-131 Block Control Frames (FrameVerV4)
 
-BRC-131 frames may arrive via UDP or TCP ingress. UDP workers inspect version byte `0x04`
-and call `Forwarder.ProcessBlock`; `handleConn` does the same on the TCP path.
+BRC-131 frames do not arrive via the public UDP/TCP ingress — those sockets are
+transaction-class, and `DispatchClass` drops version byte `0x04` frames there
+(counted in `bsp_privileged_frame_rejected_total`). They originate from the
+privileged block push lane (`-block-listen-port`, standard 8727): `objingress`
+reframes each BRC-144 push object into a BRC-131 frame and dispatches it as
+privileged, routing to `Forwarder.ProcessBlock`.
 
 `ProcessBlock`:
 - Validates via `frame.DecodeBlock`.
@@ -98,8 +107,11 @@ Two `MsgType` values are defined (byte 7 of the header):
 
 ## BRC-132 Subtree Data Frames (FrameVerV5)
 
-BRC-132 frames may arrive via UDP or TCP ingress; version byte `0x05`. UDP workers and
-`handleConn` both call `Forwarder.ProcessSubtreeData`.
+BRC-132 frames (version byte `0x05`) are likewise dropped on the public
+transaction-class ingress. They originate from the privileged subtree push lane
+(`-subtree-listen-port`, standard 8726): `objingress` reframes each BRC-143 push
+object into a BRC-132 frame and dispatches it as privileged, routing to
+`Forwarder.ProcessSubtreeData`.
 
 ## BRC-134 Chained Anchor Transaction Frames (FrameVerV6)
 
@@ -192,22 +204,22 @@ and UDP share the same `forwarder.Forwarder` and egress targets.
 |---|---|---|---|---|
 | `0x01` (BRC-12) | Transaction | 44 bytes | `PayLen` bytes | `Process` |
 | `0x02` (BRC-124/BRC-128) | Transaction | 92 bytes | 48 more + `PayLen` | `Process` |
-| `0x04` (BRC-131) | Block control | 92 bytes | 48 more + `PayLen` | `ProcessBlock` |
-| `0x05` (BRC-132) | Subtree data | 92 bytes | 48 more + `PayLen` | `ProcessSubtreeData` |
+| `0x04` (BRC-131) | Block control | 92 bytes | 48 more + `PayLen` | dropped — `DispatchClass` rejects privileged frames on the transaction-class port |
+| `0x05` (BRC-132) | Subtree data | 92 bytes | 48 more + `PayLen` | dropped — `DispatchClass` rejects privileged frames on the transaction-class port |
 | `0x06` (BRC-134) | Anchor tx | 92 bytes | 48 more + `PayLen` | `ProcessAnchor` |
 | `0x30` (MsgType, BRC-127) | SubtreeGroupAnnounce | 64 bytes | 20 more (no payload) | `ForwardControl` |
 
 > The dispatcher branches on `hdrBuf[6]`. For BRC-12/124/131/132/134 this byte is the Frame Version (`0x01`/`0x02`/`0x04`/`0x05`/`0x06`); for BRC-127 it is the MsgType byte (`0x30 = MsgTypeSubtreeGroupAnnounce`).
 
 ```
-senders (UDP/TCP)          proxy (N UDP workers + 1 TCP listener)
-─────────────────          ─────────────────────────────────────
-tx_a  ──UDP──▶ [worker 0] ─▶ forwarder ─▶ FF05::B:3    ──▶ sub_X   (shard, data-plane)
-tx_b  ──UDP──▶ [worker 1] ─▶ forwarder ─▶ FF05::B:1    ──▶ sub_Y
-blk_c ──UDP──▶ [worker N] ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z   (GroupBlockBroadcast, BRC-131)
-blk_d ──TCP──▶ [tcp conn] ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z
-anc_e ──UDP──▶ [worker N] ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z   (GroupBlockBroadcast, BRC-134)
-sub_f ──TCP──▶ [tcp conn] ─▶ forwarder ─▶ FF05::B:FFFB ──▶ sub_W   (GroupSubtreeDataAnnounce, BRC-132)
+senders                       proxy (N UDP workers + 1 TCP listener + push lanes)
+───────                       ──────────────────────────────────────────────────
+tx_a  ──UDP 8725──▶ [worker 0]  ─▶ forwarder ─▶ FF05::B:3    ──▶ sub_X   (shard, data-plane)
+tx_b  ──UDP 8725──▶ [worker 1]  ─▶ forwarder ─▶ FF05::B:1    ──▶ sub_Y
+anc_c ──UDP 8725──▶ [worker N]  ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z   (GroupBlockBroadcast, BRC-134)
+blk_d ──TCP 8727──▶ [push lane] ─▶ BRC-144 → BRC-131 ─▶ forwarder ─▶ FF0E::B:FFFE ──▶ sub_Z   (GroupBlockBroadcast)
+sub_e ──TCP 8726──▶ [push lane] ─▶ BRC-143 → BRC-132 ─▶ forwarder ─▶ FF05::B:FFFB ──▶ sub_W   (GroupSubtreeDataAnnounce)
+blk_f ──UDP 8725──▶ [worker N]  ─▶ dropped (privileged frame on transaction-class ingress)
 ```
 
 ## Wire Format
@@ -377,11 +389,13 @@ No re-encoding, no per-worker encode buffer. The verbatim path references
 the receive-batch buffers directly; buffer reuse is safe because Flush
 completes before the next ReadBatch overwrites the same memory.
 
-BRC-131, BRC-132, and BRC-134 frames received via UDP or TCP follow parallel paths
-through `ProcessBlock`, `ProcessSubtreeData`, and `ProcessAnchor` respectively.
-These functions perform the same in-place HashKey/SeqNum stamping (and optional
-BRC-130 fragmentation for BRC-131/BRC-132), but route to fixed control-plane
-groups rather than shard-derived addresses.
+BRC-134 anchor frames received via UDP or TCP follow a parallel path through
+`ProcessAnchor`. BRC-131 and BRC-132 frames follow the same pattern through
+`ProcessBlock` and `ProcessSubtreeData`, but enter only via the privileged
+push lanes — the public ingress rejects them. These functions perform the same
+in-place HashKey/SeqNum stamping (and optional BRC-130 fragmentation for
+BRC-131/BRC-132), but route to fixed control-plane groups rather than
+shard-derived addresses.
 
 ## Graceful Shutdown
 
