@@ -57,6 +57,11 @@ type ObjectIngress struct {
 	// every one of them — a tee wired only into the UDP worker silently misses
 	// everything submitted over this path.
 	retryTee string
+	// admit observes each object this lane takes off the wire, at the same
+	// point the TCP lane and the UDP worker loop account for one. See
+	// [TCPIngress.SetAdmitHook]; a push lane is an admission boundary too, so
+	// leaving it unhooked would under-report a miner co-brand's ingress.
+	admit AdmitFunc
 	// localMirror mirrors egressed DATA datagrams to the co-located LISTENER's
 	// dedicated ingest (own-node delivery). Set on EVERY ingress path's Egress.
 	localMirror string
@@ -69,6 +74,10 @@ func (oi *ObjectIngress) SetRetryTee(addr string) { oi.retryTee = addr }
 // SetLocalMirror enables mirroring of egressed DATA datagrams to the co-located
 // listener's dedicated loopback ingest (own-node delivery).
 func (oi *ObjectIngress) SetLocalMirror(addr string) { oi.localMirror = addr }
+
+// SetAdmitHook installs fn as this lane's admission observer (see
+// [TCPIngress.SetAdmitHook]). Call before [Run].
+func (oi *ObjectIngress) SetAdmitHook(fn AdmitFunc) { oi.admit = fn }
 
 // NewObjectIngress constructs an ObjectIngress for the given push class
 // (objfmt.ClassSubtree or objfmt.ClassBlock). No sockets are opened until
@@ -207,6 +216,9 @@ func (oi *ObjectIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 				oi.log.Debug("object read error; closing connection", "remote", remote, "err", err)
 			}
 			return
+		}
+		if oi.admit != nil {
+			oi.admit(1, len(obj))
 		}
 		if oi.class == objfmt.ClassBEEF {
 			// The BEEF lane's object IS the submission record; the forwarder

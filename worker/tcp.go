@@ -145,6 +145,15 @@ type TCPIngress struct {
 	// dedicated ingest (own-node delivery). Like retryTee, must be set on EVERY
 	// ingress path's Egress.
 	localMirror string
+	// admit, when set, observes every submission this listener takes off the
+	// wire, at the SAME point the UDP worker loop accounts for a received
+	// datagram: after the read, before DispatchClass routes (or drops) it. A
+	// commercial build uses it for per-co-brand admitted-frame/byte counters,
+	// which would otherwise miss the TCP lanes entirely — and TCP is the
+	// supported submission transport, so an ingress-side attribution metric
+	// wired only into the UDP loop reads zero on a real fabric. nil = no hook,
+	// and the call sites cost one nil check.
+	admit AdmitFunc
 	// coalesceLinger, when >0 AND coalescing is armed on a connection, is the
 	// bounded window a connection accumulates same-flow frames before flushing,
 	// trading up to this much added latency for denser bundles on a fast
@@ -163,6 +172,19 @@ func (ti *TCPIngress) SetCoalesceLinger(d time.Duration) { ti.coalesceLinger = d
 // SetLocalMirror enables mirroring of egressed DATA datagrams to the co-located
 // listener's dedicated loopback ingest (own-node delivery).
 func (ti *TCPIngress) SetLocalMirror(addr string) { ti.localMirror = addr }
+
+// AdmitFunc observes one submission admitted at an ingress socket: frames is
+// what it counts as on the fabric (1 for every grammar this package reads off a
+// stream — a framed frame, a bare transaction, a control extension, a BEEF
+// record) and bytes is what was read for it. It is called on the connection
+// goroutine, so an implementation must be cheap and non-blocking; a counter
+// increment is the intended use.
+type AdmitFunc func(frames, bytes int)
+
+// SetAdmitHook installs fn as this listener's admission observer. Call before
+// [Run]. Attribution only — the hook cannot reject, and nothing downstream reads
+// what it records.
+func (ti *TCPIngress) SetAdmitHook(fn AdmitFunc) { ti.admit = fn }
 
 // NewTCPIngress constructs a TCPIngress. No sockets are opened until [Run] is
 // called.
@@ -462,6 +484,9 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 			if ti.rec != nil {
 				ti.rec.TCPBytesReceived(frame.SubtreeGroupAnnounceSize)
 			}
+			if ti.admit != nil {
+				ti.admit(1, frame.SubtreeGroupAnnounceSize)
+			}
 			ti.fwd.ForwardControl(egr, ctrlBuf, shard.GroupSubtreeGroupAnnounce, ti.fwd.EgressPort())
 			bat.add()
 			continue
@@ -516,6 +541,9 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(hdrSize + payLen)
 		}
+		if ti.admit != nil {
+			ti.admit(1, hdrSize+payLen)
+		}
 		// The full frame is already read off the stream, so a class
 		// rejection (block/coinbase/subtree on a transaction-only socket)
 		// drops it without corrupting stream framing. DispatchClass is the
@@ -554,6 +582,9 @@ func (ti *TCPIngress) handleBEEFConn(br *bufio.Reader, remote net.Addr, egr *for
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(len(rec))
 		}
+		if ti.admit != nil {
+			ti.admit(1, len(rec))
+		}
 		// SubmitBEEF copies the object into fresh per-topic frame buffers, so
 		// the Reader window may be reused on the next iteration — and the
 		// enqueued per-topic buffers are batch-safe for the same reason.
@@ -576,6 +607,9 @@ func (ti *TCPIngress) handleBareConn(br *bufio.Reader, remote net.Addr, egr *for
 		}
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(len(obj))
+		}
+		if ti.admit != nil {
+			ti.admit(1, len(obj))
 		}
 		// DispatchBareTx (NOT DispatchClass): this connection committed to the
 		// bare grammar, and the tx reader does not validate the version bytes,
