@@ -174,6 +174,13 @@ Enable it only where the lane really does carry fabric traffic:
 Enabling it does not waive any other gate: a stamped frame admitted this way is
 still subject to `-require-ef` and `-verify-payload-hash`.
 
+**Gap-injection load rigs need this flag.** `subtx-generator` in unicast mode
+leaves `SeqNum` zero *unless* gap injection is active, in which case it stamps
+per-flow SeqNums itself so the listener sees engineered gaps. Those frames are
+stamped input by definition, so a gap-injection run against a proxy requires
+`-allow-stamped-ingress=true`. Its direct-multicast mode bypasses the proxy and
+is unaffected either way.
+
 ### Why `-require-ef` no longer exempts stamped frames
 
 `-require-ef` used to skip its check when `SeqNum != 0`, reasoning that a
