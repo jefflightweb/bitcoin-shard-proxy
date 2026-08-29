@@ -349,21 +349,28 @@ Teranode requires **Extended Format** (EF — the BRC-30 marker
 `00 00 00 00 00 EF` at payload bytes 4–9): a raw transaction (BRC-12) omits each
 input's funding value and locking script, which the stateless fabric cannot
 supply (extension needs a UTXO lookup — a wallet/submitter concern). With
-`-require-ef` set the ingress is EF-native: a **submission** must be EF, or it is
+`-require-ef` set the ingress is EF-native: a transaction must be EF, or it is
 rejected —
 
 - a legacy BRC-12 (44-byte, FrameVerV1) frame,
-- an unstamped raw BRC-124 (92-byte, FrameVerV2 without the marker) frame, and
+- a raw BRC-124 (92-byte, FrameVerV2 without the marker) frame, and
 - a bare non-EF transaction
 
 are dropped (`bsp` packet-dropped counters `reason=ingress_not_ef` /
-`bare_tx_not_ef`). **Relayed frames are exempt** — a frame that is already
-stamped (`SeqNum != 0`) was validated at its ingress, so the relay/spine hot
-path is untouched, and when `-require-ef` is off (default) both raw and EF are
+`bare_tx_not_ef`). When `-require-ef` is off (default) both raw and EF are
 accepted and forwarded verbatim (legacy contract preserved). The `requireEF`
 guard short-circuits to a single predicted branch when off, so there is no
 measurable hot-path cost either way (`forwarder` micro-benchmarks: relay and
 submission both within run-to-run noise of baseline).
+
+**Stamped frames are not exempt.** The check used to skip frames carrying a
+`SeqNum`, on the reasoning that a relayed frame was validated at its own
+ingress. Nothing distinguished that from a submitter setting a non-zero
+`SeqNum`, which made the EF posture opt-out with a one-byte edit. A lane that
+legitimately carries relayed frames now declares itself with
+`-allow-stamped-ingress`; every other lane rejects stamped input outright
+(`reason=stamped_ingress`). See
+[Stamped ingress](configuration.md#stamped-ingress).
 
 Because a raw transaction and its extended form share the **same TxID** (the ID
 is over the standard serialisation), a raw→EF "re-transmit" service on the fabric

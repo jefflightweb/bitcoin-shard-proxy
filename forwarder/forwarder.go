@@ -178,6 +178,20 @@ type Forwarder struct {
 	// See docs/architecture.md § Transaction ingress (framed, bare, EF-native).
 	requireEF bool
 
+	// allowStampedIngress admits framed BRC-124/BRC-128 input that already
+	// carries a SeqNum — a frame some other proxy stamped and emitted. Off by
+	// default: an ingress proxy accepts submissions, and a submitter has no
+	// business presenting a stamped frame. Turn it on only where the lane
+	// really does carry fabric traffic (a spine collect lane, a relay hop).
+	allowStampedIngress bool
+
+	// verifyPayloadHash gates framed BRC-124/BRC-128 (V2) input on the
+	// canonical TxID of its payload. Off by default. Unlike requireEF this
+	// deliberately does NOT exempt already-stamped frames: SeqNum is
+	// attacker-chosen, so exempting on it is the bypass, not an optimisation.
+	// See SetVerifyPayloadHash.
+	verifyPayloadHash bool
+
 	// groupAddrs caches the multicast destination address by group index. The
 	// address is a pure function of (mcPrefix, mcGroupID, idx, egressPort) —
 	// invariant across resharding/bridging, which change the index a txid maps
@@ -303,6 +317,47 @@ func (fw *Forwarder) SetBlockPoW(require bool, floorBits uint32) {
 // submissions are rejected. Off by default. Relayed frames (already stamped) are
 // unaffected. Must be called before any worker starts.
 func (fw *Forwarder) SetRequireEF(require bool) { fw.requireEF = require }
+
+// SetAllowStampedIngress admits framed BRC-124/BRC-128 (V2) input whose SeqNum
+// is already set. Off by default. Must be called before any worker starts.
+//
+// A stamped frame is one another proxy has already admitted, sharded, and
+// emitted. On a submission lane that is not a thing a submitter can legitimately
+// send, and SeqNum is just bytes in the frame — so accepting stamped input by
+// default let anyone opt out of the gates that key off it. Enable it only on a
+// lane that genuinely carries fabric traffic: a spine's collect socket, or a
+// relay hop forwarding another proxy's output.
+//
+// This does not exempt anything from the other gates. A stamped frame admitted
+// here is still subject to -require-ef and -verify-payload-hash.
+func (fw *Forwarder) SetAllowStampedIngress(allow bool) { fw.allowStampedIngress = allow }
+
+// SetVerifyPayloadHash enables canonical-TxID verification of framed
+// BRC-124/BRC-128 (V2) input: the frame's TxID must equal the transaction id
+// of its payload — SHA256d over the standard serialization, EF extras
+// excluded ([objfmt.TxID]), which is the id producers stamp and consumers
+// derive. Mismatches are dropped before the ingress dedup claim and before
+// group derivation. Off by default. Must be called before any worker starts.
+//
+// This is an ingress-side gate, not a duplicate of the listener's flag of the
+// same name. Two things key off the wire TxID here and neither is recoverable
+// downstream:
+//
+//   - Group derivation is the top shard bits of TxID[0:4], so an unverified
+//     TxID lets a submitter choose its own shard.
+//   - The ingress dedup claim is keyed on the TxID. With -ingress-dedup on
+//     (the default), a frame carrying an honest transaction's TxID over a
+//     forged payload wins the claim and the honest transaction is then
+//     suppressed at ingress — it never reaches a listener, so the listener's
+//     own verification cannot undo it.
+//
+// Cost is one SHA256d over the payload per framed transaction, which on a CPU
+// without SHA-NI can exceed the whole forward path; measure on the target
+// hardware before enabling on a hot lane. Bare submissions are unaffected:
+// the proxy derives their TxID itself, so there is nothing to verify and no
+// cost is added. BRC-12 (V1) frames are forwarded verbatim regardless — the
+// legacy wire format carries no payload-bound identifier.
+func (fw *Forwarder) SetVerifyPayloadHash(v bool) { fw.verifyPayloadHash = v }
 
 // SetCoalesce enables BRC-142 within-batch frame coalescing. When enabled,
 // eligible BRC-124/128 transactions are buffered per (sender, group, subtree)
@@ -646,7 +701,9 @@ func (fw *Forwarder) dispatchBareTx(egr *Egress, tx []byte, src net.Addr, worker
 	if fw.rec != nil {
 		fw.rec.IngressMetered(metrics.IngressClassTx, false, len(tx))
 	}
-	fw.Process(egr, framed, src, workerID)
+	// Self-framed: MulticastBytes derived the TxID from these exact payload
+	// bytes, so the payload-hash gate would compare our own hash to itself.
+	fw.process(egr, framed, src, workerID, false)
 }
 
 // rejectPrivileged drops a privileged control-plane frame received on a
@@ -683,6 +740,13 @@ func (fw *Forwarder) rejectPrivileged(raw []byte, workerID int) {
 // case the frame is decoded and stamped but not enqueued — used by tests
 // that exercise only the stamping logic.
 func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int) {
+	fw.process(egr, raw, src, workerID, fw.verifyPayloadHash)
+}
+
+// process is Process with the payload-hash gate made explicit, so the one
+// caller that framed the transaction itself can skip it. verify is only ever
+// fw.verifyPayloadHash (external input) or false (self-framed input).
+func (fw *Forwarder) process(egr *Egress, raw []byte, src net.Addr, workerID int, verify bool) {
 	f, err := frame.Decode(raw)
 	if err != nil {
 		fw.log.Debug("frame decode error", "err", err, "len", len(raw))
@@ -692,18 +756,82 @@ func (fw *Forwarder) Process(egr *Egress, raw []byte, src net.Addr, workerID int
 		return
 	}
 
-	// EF-native ingress (opt-in). A submission must be Extended Format: a legacy
-	// BRC-12 (V1) frame, or an unstamped raw BRC-124 (V2 without the marker), is
-	// rejected. Relayed frames (already stamped, SeqNum != 0) are exempt — they
-	// were validated at their ingress — so the relay hot path is unchanged; and
-	// when requireEF is off the whole check short-circuits to a single predicted
-	// branch. SeqNum is read for the stamp decision anyway; the marker compare
-	// runs only for an unstamped transaction.
-	if fw.requireEF && (f.Version == frame.FrameVerV1 || (f.SeqNum == 0 && !objfmt.IsEF(f.Payload))) {
-		if fw.rec != nil && egr != nil && len(egr.targets) > 0 {
-			fw.rec.PacketDropped(egr.targets[0].Iface.Name, workerID, "ingress_not_ef")
+	// Stamped-ingress gate. A frame arriving with a SeqNum was admitted,
+	// sharded and emitted by some other proxy; on a submission lane that is
+	// not something a submitter can legitimately present. Off by default, so
+	// the ordinary posture is "this proxy accepts submissions, not relay".
+	// One compare, and V1 decodes with a zero SeqNum so legacy frames are
+	// unaffected. See SetAllowStampedIngress.
+	if !fw.allowStampedIngress && f.Version == frame.FrameVerV2 && f.SeqNum != 0 {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(egrIface(egr), workerID, "stamped_ingress")
+		}
+		if fw.debug {
+			fw.log.Debug("stamped frame on a submission lane",
+				"txid_prefix", fmt.Sprintf("%x", f.TxID[:8]),
+				"seq_num", f.SeqNum,
+			)
 		}
 		return
+	}
+
+	// EF-native ingress (opt-in). A transaction must be Extended Format: a
+	// legacy BRC-12 (V1) frame, or a BRC-124 frame without the marker, is
+	// rejected. This deliberately does NOT exempt stamped frames: SeqNum is
+	// chosen by whoever sent the frame, so an exemption keyed on it is a
+	// one-byte opt-out of the EF posture rather than a relay optimisation. A
+	// relay lane that legitimately carries stamped frames declares itself with
+	// -allow-stamped-ingress, and its traffic is Extended Format anyway on an
+	// EF-native fabric. When requireEF is off the check short-circuits to a
+	// single predicted branch.
+	if fw.requireEF && (f.Version == frame.FrameVerV1 || !objfmt.IsEF(f.Payload)) {
+		if fw.rec != nil {
+			fw.rec.PacketDropped(egrIface(egr), workerID, "ingress_not_ef")
+		}
+		return
+	}
+
+	// Payload-hash verification (opt-in). This MUST stay ahead of the dedup
+	// claim below: a forged frame that reaches the claim first burns the
+	// honest transaction's dedup slot, and suppressing the honest frame at
+	// ingress is exactly the outcome the gate exists to prevent. Only V2
+	// carries a payload-bound TxID; V1 is forwarded verbatim.
+	if verify && f.Version == frame.FrameVerV2 {
+		// The canonical id binds only the transaction TxSize walks, so a
+		// payload of "one valid transaction followed by junk" would otherwise
+		// verify against the honest id and carry the tail onto the fabric.
+		// Require the payload to be exactly one transaction — the same bound
+		// dispatchBareTx already applies to a bare submission.
+		if sz, szErr := objfmt.TxSize(f.Payload); szErr != nil || sz != len(f.Payload) {
+			if fw.rec != nil {
+				fw.rec.PacketDropped(egrIface(egr), workerID, "payload_not_one_tx")
+			}
+			if fw.debug {
+				fw.log.Debug("payload is not exactly one transaction",
+					"txid_prefix", fmt.Sprintf("%x", f.TxID[:8]),
+					"payload_len", len(f.Payload),
+					"tx_size", sz,
+					"err", szErr,
+				)
+			}
+			return
+		}
+		computed, idErr := objfmt.TxID(f.Payload)
+		if idErr != nil || computed != f.TxID {
+			if fw.rec != nil {
+				fw.rec.PacketDropped(egrIface(egr), workerID, "payload_hash_mismatch")
+			}
+			if fw.debug {
+				fw.log.Debug("payload hash mismatch",
+					"txid_prefix", fmt.Sprintf("%x", f.TxID[:8]),
+					"computed_prefix", fmt.Sprintf("%x", computed[:8]),
+					"payload_len", len(f.Payload),
+					"ef", objfmt.IsEF(f.Payload),
+					"err", idErr,
+				)
+			}
+			return
+		}
 	}
 
 	// Ingress TxID dedup gate. BRC-124/BRC-128 (V2) frames claim by TxID;

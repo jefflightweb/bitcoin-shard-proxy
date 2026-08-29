@@ -594,6 +594,8 @@ func TestForwarder_Bridging_DualEmitOnDistinctIndices(t *testing.T) {
 	conn, _ := openLoopbackUDP(t)
 	egr := makeEgress(t, fw, conn)
 
+	// Dual-emit is a relay behaviour; the fixture is pre-stamped on purpose.
+	fw.SetAllowStampedIngress(true)
 	raw := buildV2Frame(t, 0xFF, 1, []byte("payload"))
 	fw.Process(egr, raw, fakeAddr{}, 0)
 
@@ -618,6 +620,8 @@ func TestForwarder_Bridging_SingleEmitOnIdenticalIndices(t *testing.T) {
 	conn, _ := openLoopbackUDP(t)
 	egr := makeEgress(t, fw, conn)
 
+	// Dual-emit is a relay behaviour; the fixture is pre-stamped on purpose.
+	fw.SetAllowStampedIngress(true)
 	raw := buildV2Frame(t, 0x00, 1, []byte("payload"))
 	fw.Process(egr, raw, fakeAddr{}, 0)
 

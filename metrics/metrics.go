@@ -617,8 +617,11 @@ func (r *Recorder) PacketReceived(iface string, workerID int, size int) {
 	c.rxSize.Observe(float64(size))
 }
 
-// PacketDropped records a dropped datagram.
-// reason must be one of: "decode_error", "write_error".
+// PacketDropped records a dropped datagram. reason is the free-form label
+// written to bsp_packets_dropped_total{reason}; the live set is whatever the
+// forwarder and worker packages pass (decode_error, write_error, ingress_not_ef,
+// bare_tx_malformed, payload_hash_mismatch, bundle_short, …). Keep it a small
+// bounded vocabulary — it is a metric label.
 func (r *Recorder) PacketDropped(iface string, workerID int, reason string) {
 	r.promRxDrops.WithLabelValues(strconv.Itoa(workerID), iface, reason).Inc()
 }

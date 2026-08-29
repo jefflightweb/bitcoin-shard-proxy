@@ -82,6 +82,20 @@ type Config struct {
 	// default (accepts raw + EF). Relayed (already-stamped) frames are unaffected.
 	RequireEF bool
 
+	// AllowStampedIngress admits framed BRC-124/BRC-128 input that already
+	// carries a SeqNum (a frame another proxy stamped and emitted). Off by
+	// default — an ingress proxy accepts submissions, not relay. Enable on a
+	// spine collect lane or a relay hop. See
+	// forwarder.Forwarder.SetAllowStampedIngress.
+	AllowStampedIngress bool
+
+	// VerifyPayloadHash gates framed BRC-124/BRC-128 input on the canonical
+	// TxID of its payload, dropping mismatches before the ingress dedup claim
+	// and before group derivation. Off by default; costs one SHA256d per
+	// framed transaction. Bare submissions are unaffected (the proxy derives
+	// their TxID itself). See forwarder.Forwarder.SetVerifyPayloadHash.
+	VerifyPayloadHash bool
+
 	// Sharding
 	ShardBits   uint   // Number of txid prefix bits used as the group key (1–12)
 	NumGroups   uint32 // Derived: 1 << ShardBits — total distinct multicast groups
@@ -218,6 +232,10 @@ func Load() (*Config, error) {
 		"gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header (permissionless: validates work, not identity)")
 	flag.BoolVar(&c.RequireEF, "require-ef", envBool("REQUIRE_EF", false),
 		"EF-native ingress: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted (relayed frames unaffected)")
+	flag.BoolVar(&c.AllowStampedIngress, "allow-stamped-ingress", envBool("ALLOW_STAMPED_INGRESS", false),
+		"admit framed BRC-124/BRC-128 input that already carries a SeqNum (another proxy's output). Off by default: an ingress proxy accepts submissions, not relay. Enable on a spine collect lane or relay hop")
+	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
+		"verify the canonical TxID of framed BRC-124/BRC-128 input against its payload and drop mismatches before ingress dedup (bare submissions unaffected; costs one SHA256d per framed tx)")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
 		"difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
 	ifaceFlag := flag.String("iface", envStr("MULTICAST_IF", "eth0"),

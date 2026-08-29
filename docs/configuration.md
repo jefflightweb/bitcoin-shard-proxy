@@ -13,7 +13,9 @@ as fallbacks; hard-coded defaults apply when neither is present.
 | `-subtree-listen-port` | `SUBTREE_LISTEN_PORT` | `0` | TCP port accepting BRC-143 subtree push frames (privileged; bind tunnel-side; standard 8726; 0 = disabled) |
 | `-block-listen-port` | `BLOCK_LISTEN_PORT` | `0` | TCP port accepting BRC-144 block push frames (privileged; bind tunnel-side; standard 8727; 0 = disabled) |
 | `-require-block-pow` | `REQUIRE_BLOCK_POW` | `true` | Gate BRC-131 block announces on a cheap stateless proof-of-work check of the in-frame header. Permissionless (validates work, not identity). **Default ON** — set `=false` to admit unvalidated announces. See [Block-announce proof-of-work](#block-announce-proof-of-work) |
-| `-require-ef` | `REQUIRE_EF` | `false` | **EF-native ingress**: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted. Relayed (already-stamped) frames are exempt, so the relay hot path is untouched. See [EF-native ingress](architecture.md#ef-native-ingress--require-ef) |
+| `-require-ef` | `REQUIRE_EF` | `false` | **EF-native ingress**: reject raw BRC-12/BRC-124 transaction submissions; only Extended Format (BRC-30) is admitted. Applies to stamped frames too — `SeqNum` is sender-chosen and must not waive the EF posture. See [EF-native ingress](architecture.md#ef-native-ingress--require-ef) |
+| `-allow-stamped-ingress` | `ALLOW_STAMPED_INGRESS` | `false` | Admit framed BRC-124/BRC-128 input that already carries a SeqNum (another proxy's output). **Off by default**: an ingress proxy accepts submissions, not relay. Enable on a spine collect lane or relay hop. See [Stamped ingress](#stamped-ingress) |
+| `-verify-payload-hash` | `VERIFY_PAYLOAD_HASH` | `false` | Verify the canonical TxID of **framed** BRC-124/BRC-128 input against its payload and drop mismatches before the ingress dedup claim. Bare submissions are unaffected (the proxy derives their TxID itself). Costs one SHA256d per framed transaction. See [Payload-hash verification](#payload-hash-verification) |
 | `-min-pow-bits` | `MIN_POW_BITS` | `0` | PoW difficulty floor in Bitcoin compact `nBits` form (e.g. `0x1d00ffff`); `0` = header self-consistency only (weak) |
 | `-iface` | `MULTICAST_IF` | `eth0` | Comma-separated NIC names for multicast egress |
 | `-egress-port` | `EGRESS_PORT` | `9001` | Destination UDP port for multicast groups |
@@ -147,6 +149,122 @@ Scope and limits:
   ingress; the consuming node (Teranode) does full validation.
 
 Rejections increment `bsp_block_pow_rejected_total`.
+
+---
+
+## Stamped ingress
+
+`-allow-stamped-ingress` decides whether this proxy accepts framed
+BRC-124/BRC-128 input that already carries a `SeqNum`. **Off by default.**
+
+A stamped frame is one another proxy already admitted, sharded and emitted. On
+a submission lane that is not something a submitter can legitimately send, and
+`SeqNum` is just eight bytes in the frame that the sender chooses. Rejections
+increment `bsp_packets_dropped_total{reason="stamped_ingress"}`.
+
+Enable it only where the lane really does carry fabric traffic:
+
+| Deployment | Setting |
+|------------|---------|
+| Public / customer submission lane (8725) | leave off |
+| `shard-proxy-1bsv -mode collapsed` \| `ingress` | leave off |
+| `shard-proxy-1bsv -mode spine` | **forced on** — the collect lane exists to re-emit stamped fabric frames |
+| A relay hop forwarding another proxy's output | on |
+
+Enabling it does not waive any other gate: a stamped frame admitted this way is
+still subject to `-require-ef` and `-verify-payload-hash`.
+
+### Why `-require-ef` no longer exempts stamped frames
+
+`-require-ef` used to skip its check when `SeqNum != 0`, reasoning that a
+relayed frame had been validated at its own ingress. That reasoning holds for
+genuine relay traffic, but nothing distinguished it from a submitter who simply
+set a non-zero `SeqNum` — making the EF posture opt-out with a one-byte edit.
+
+The exemption is gone. A lane that legitimately carries relayed frames declares
+itself with `-allow-stamped-ingress`, and on an EF-native fabric its traffic is
+Extended Format anyway, so the check costs it nothing.
+
+> **Behaviour change.** A deployment relying on the old exemption to relay
+> non-EF payloads with `-require-ef` on will now see them dropped as
+> `ingress_not_ef`. On an EF-native fabric there is no such traffic.
+
+Scope: the gate covers FrameVer `0x02` (BRC-124/BRC-128). BRC-12 (V1) decodes
+with a zero `SeqNum` and is unaffected; BRC-130 fragments (`0x03`) and the
+bundle/BEEF/block/subtree classes are outside it, as they are outside every
+other V2 gate.
+
+---
+
+## Payload-hash verification
+
+`-verify-payload-hash` requires a **framed** BRC-124/BRC-128 (FrameVer `0x02`)
+datagram to carry the canonical transaction id of its own payload: SHA256d over
+the standard serialization, EF extras excluded (`objfmt.TxID`). That is the id
+producers stamp and consumers derive, so honest Extended Format traffic
+verifies cleanly — a gate that hashed the raw EF bytes instead would drop 100%
+of it.
+
+Off by default. Two checks run, both ahead of the dedup claim and group
+derivation:
+
+| Condition | Drop reason |
+|-----------|-------------|
+| Payload is not exactly one transaction (unwalkable, truncated, or trailing bytes) | `payload_not_one_tx` |
+| Payload walks, but its canonical TxID ≠ the frame's TxID | `payload_hash_mismatch` |
+
+Both increment `bsp_packets_dropped_total{reason=...}`.
+
+### Why this is not a duplicate of the listener's flag
+
+The listener has a flag of the same name, but it cannot cover the ingress
+exposure. Two things key off the wire TxID **at the proxy**, before any
+listener sees the frame:
+
+- **Group derivation** is the top `-shard-bits` of `TxID[0:4]`, so an
+  unverified TxID lets a submitter choose its own shard.
+- **The ingress dedup claim** is keyed on the TxID, and `-ingress-dedup`
+  defaults to `true`. A frame carrying an honest transaction's TxID over a
+  forged payload wins the claim, and the honest transaction is then suppressed
+  at ingress — it never reaches a listener, so the listener's own verification
+  cannot undo it.
+
+The gate therefore runs **before** `claimIngress`, not after.
+
+### Scope and exemptions
+
+- **Bare submissions are exempt and cost nothing.** The proxy derives their
+  TxID itself when reframing, so there is nothing to verify.
+- **BRC-12 (V1) frames are forwarded verbatim** regardless — the legacy wire
+  format carries no payload-bound identifier.
+- **Already-stamped frames are *not* exempt.** `-require-ef` exempts them as a
+  relay optimisation, but `SeqNum` is chosen by whoever sent the frame, so
+  exempting on it here would be a one-byte bypass of the gate.
+- BRC-142 bundles (`0x08`), BEEF (`0x09`), and the block/subtree/anchor classes
+  are unaffected; they carry different identifiers and their own gates.
+
+### Cost
+
+One SHA256d over the payload per framed transaction, plus one structural walk.
+`objfmt.TxID` streams the standard serialization into the hash rather than
+materialising it, so the check allocates nothing — but the hash itself is not
+free, and on a CPU **without SHA-NI** it can exceed the cost of the entire
+forward path. Measured on a Xeon E5-2699 v3 (Haswell, no SHA-NI), a 232-byte
+1-in/1-out EF transaction: ~1.84 µs to verify against ~1.0 µs to forward.
+
+Any CPU with SHA-NI (Zen 1+, Ice Lake+, Graviton2+) hashes far faster, and Go's
+`crypto/sha256` uses it automatically. **Measure on the target edge CPU before
+enabling on a hot lane** — the ratio above is close to the worst case, not the
+typical one.
+
+Enable it on permissionless / miner-lane ingress and on commercial edges where
+submitters are not trusted. Leave it off on spine and relay hops, where the
+frame was already verified at its own ingress.
+
+The listener implements the identical check behind its own
+`-verify-payload-hash`, including the exactly-one-transaction bound, and applies
+it to BRC-130 reassembled payloads too. See `shard-listener`
+`docs/configuration.md`.
 
 ---
 
