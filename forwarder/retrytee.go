@@ -25,12 +25,17 @@ import (
 // at fixed offsets — independent of how the datagram was delivered. A locally
 // originated unicast copy therefore caches identically to a multicast one.
 //
-// Cost is one extra syscall per BATCH, not per frame: copies accumulate alongside
-// the egress queue and go out as a single WriteBatch (sendmmsg) from Flush, the
+// Cost is one extra syscall per BATCH, not per frame (on Linux): copies accumulate
+// alongside the egress queue and go out via WriteBatch (sendmmsg) from Flush, the
 // same cadence as the real egress. That is what keeps it viable next to AF_XDP —
 // AF_XDP exists to avoid per-packet syscalls, and a per-frame sendto would negate
-// it.
+// it. Off Linux, x/net's WriteBatch writes one message per call, so the flush
+// loops (see writeBatchAll) — one syscall per frame there, unavoidably.
 type retryTee struct {
+	// w is the WriteBatch seam: the socket itself in production, a fake in
+	// tests that need to force partial/errored batch results. pc is that same
+	// socket held concretely for the lifecycle (close) path only.
+	w    batchWriter
 	pc   *ipv6.PacketConn
 	addr *net.UDPAddr
 	msgs []ipv6.Message
@@ -93,6 +98,7 @@ func newRetryTee(addr string, batchHint int) (*retryTee, error) {
 		return nil, err
 	}
 	return &retryTee{
+		w:     s.pc,
 		pc:    s.pc,
 		addr:  s.addr,
 		owned: true,
@@ -104,6 +110,7 @@ func newRetryTee(addr string, batchHint int) (*retryTee, error) {
 // newSharedTee builds a tee buffer over an already-open shared TeeSocket.
 func newSharedTee(s *TeeSocket, batchHint int) *retryTee {
 	return &retryTee{
+		w:    s.pc,
 		pc:   s.pc,
 		addr: s.addr,
 		msgs: make([]ipv6.Message, 0, batchHint),
@@ -117,12 +124,15 @@ func (t *retryTee) append(raw []byte) {
 	t.msgs = append(t.msgs, ipv6.Message{Buffers: [][]byte{raw}, Addr: t.addr})
 }
 
-// flush dispatches the queued copies in ONE WriteBatch and resets the queue.
+// flush dispatches the queued copies and resets the queue. It drains through
+// writeBatchAll rather than a bare WriteBatch: off Linux a single WriteBatch
+// writes only msgs[0], so every copy after the first would be silently dropped
+// and the co-located cache would answer MISS for frames it was told it held.
 func (t *retryTee) flush() {
 	if len(t.msgs) == 0 {
 		return
 	}
-	sent, err := t.pc.WriteBatch(t.msgs, 0)
+	sent, err := writeBatchAll(t.w, t.msgs, 0)
 	if err != nil || sent < len(t.msgs) {
 		missed := len(t.msgs) - sent
 		if missed < 0 {

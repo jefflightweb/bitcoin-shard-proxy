@@ -1,9 +1,12 @@
 // Package forwarder — egress.go implements the per-worker outbound message
 // batcher. Each Process*/ForwardControl call enqueues outbound datagrams
 // into an Egress; the worker calls [Egress.Flush] at the end of each receive
-// batch, which dispatches one ipv6.PacketConn.WriteBatch (sendmmsg on Linux)
-// per target. This amortises the egress syscall cost across the entire
-// receive batch instead of paying it per packet per interface.
+// batch, which drains each target's queue through ipv6.PacketConn.WriteBatch.
+// On Linux that is one sendmmsg per target, amortising the egress syscall cost
+// across the entire receive batch instead of paying it per packet per
+// interface. On every other GOOS x/net's WriteBatch writes a single message per
+// call, so the drain loops until the queue is empty (see writeBatchAll) — same
+// bytes on the wire, one syscall per datagram.
 //
 // An Egress is owned by a single worker goroutine and is not safe for
 // concurrent use.
@@ -48,6 +51,56 @@ const addrCacheInit = 64
 // lane's retry loop cannot be exercised against a healthy kernel socket).
 type batchWriter interface {
 	WriteBatch(ms []ipv6.Message, flags int) (int, error)
+}
+
+// errNoBatchProgress stands in for a WriteBatch that reported neither progress
+// nor an error — nothing to classify, and nothing that a bare re-submit would
+// change, so the drain loop surrenders instead of spinning.
+var errNoBatchProgress = errors.New("egress: WriteBatch made no progress")
+
+// writeBatchAll submits ms through w, re-submitting the unsent remainder until
+// the batch is drained, w reports an error, or w stops making progress. It
+// returns the total number of messages accepted and the error that stopped the
+// drain (nil only when the whole batch went out).
+//
+// The loop is a CORRECTNESS requirement, not an optimisation.
+// golang.org/x/net/ipv6's WriteBatch only issues sendmmsg on Linux; on every
+// other GOOS it falls back to SendMsg(&ms[0]) and returns 1, so a single call
+// silently writes just the first datagram of the batch and drops the rest on
+// the floor. A caller that treats one WriteBatch as "the batch went out" loses
+// everything after ms[0] on FreeBSD — the whole lossy multicast egress and its
+// tees. Looping is the portable contract: on Linux the first call normally
+// takes them all and the loop exits immediately (no extra syscall), on FreeBSD
+// it degrades to one sendmsg per datagram, which is exactly what a correct
+// per-frame egress would have cost there anyway. No runtime.GOOS gate is
+// needed or wanted — a partial WriteBatch is legal on Linux too (short
+// sendmmsg), and the same loop covers both.
+//
+// It deliberately does NOT retry: a returned error stops the drain and is
+// handed back to the caller, so the lossy lane keeps its drop-and-count
+// semantics and the reliable lane keeps sole ownership of backoff/budget.
+func writeBatchAll(w batchWriter, ms []ipv6.Message, flags int) (int, error) {
+	off := 0
+	for off < len(ms) {
+		n, err := w.WriteBatch(ms[off:], flags)
+		if n > 0 {
+			// Clamp: WriteBatch must never claim more than it was handed, and a
+			// bogus over-count would run off the end of the slice.
+			if n > len(ms)-off {
+				n = len(ms) - off
+			}
+			off += n
+		}
+		if err != nil {
+			// Includes the WriteBatch(-1, err) hard-failure form: n is ignored,
+			// off stays where it was.
+			return off, err
+		}
+		if n <= 0 {
+			return off, errNoBatchProgress
+		}
+	}
+	return off, nil
 }
 
 type Egress struct {
@@ -479,7 +532,11 @@ func (e *Egress) Flush() {
 			e.flushReliable(i)
 			continue
 		}
-		sent, err := e.pcs[i].WriteBatch(e.msgs[i], 0)
+		// writeBatchAll, not a bare WriteBatch: a partial write must be
+		// re-submitted, or the entire batch after the first datagram is lost on
+		// any non-Linux GOOS (see writeBatchAll). It still surrenders on the
+		// first error, which is what keeps the lossy lane drop-and-count.
+		sent, err := writeBatchAll(e.pcs[i], e.msgs[i], 0)
 		if err != nil {
 			e.logWriteError(i, len(e.msgs[i]), sent, err)
 		}
@@ -515,26 +572,30 @@ func (e *Egress) flushReliable(i int) {
 	attempts := 0
 	var werr error
 	for off < len(msgs) {
-		sent, err := e.pcs[i].WriteBatch(msgs[off:], 0)
+		// writeBatchAll already re-submits an error-free partial write (the
+		// non-Linux one-message-per-call case), so a nil error here means the
+		// remainder is fully drained. Everything below is the reliable lane's
+		// extra layer: retrying an ERRORED or stalled batch.
+		sent, err := writeBatchAll(e.pcs[i], msgs[off:], 0)
 		if sent > 0 {
 			off += sent
 			attempts = 0
 			if off >= len(msgs) {
 				break
 			}
-			if err == nil {
-				continue // partial progress, no error: re-submit immediately
-			}
 		}
-		if err != nil && !isTransientSendErr(err) {
+		// errNoBatchProgress is the helper's stand-in for a (0, nil) result:
+		// no errno to classify, so treat it like a transient stall rather than
+		// a hard failure.
+		if err != nil && !errors.Is(err, errNoBatchProgress) && !isTransientSendErr(err) {
 			werr = err // hard error: surrender the remainder
 			break
 		}
-		// Zero progress on a transient (or nil) result: bounded backoff.
+		// Zero progress on a transient (or unclassifiable) result: bounded backoff.
 		if attempts >= maxReliableRetries {
 			werr = err
 			if werr == nil {
-				werr = errors.New("egress: WriteBatch made no progress")
+				werr = errNoBatchProgress
 			}
 			break
 		}
@@ -589,11 +650,11 @@ func errnoOf(err error) (syscall.Errno, bool) {
 	return 0, false
 }
 
-// recordWrite fires the per-target metrics for one WriteBatch result. sent
-// is the count returned by WriteBatch; meta[0:sent] count as forwarded,
-// meta[sent:] as write-error drops. WriteBatch returns -1 (not 0) when the
-// underlying sendmmsg fails before any message is written, so sent is
-// clamped to [0, len(meta)] to keep both loops in bounds.
+// recordWrite fires the per-target metrics for one drain result. sent is the
+// number of messages accepted; meta[0:sent] count as forwarded, meta[sent:] as
+// write-error drops. WriteBatch can report -1 (not 0) when the underlying
+// sendmmsg fails before any message is written, so sent is clamped to
+// [0, len(meta)] to keep both loops in bounds.
 func (e *Egress) recordWrite(targetIdx, sent int, err error) {
 	if e.rec == nil {
 		return
