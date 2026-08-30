@@ -94,3 +94,68 @@ jobs:
       - name: E2E test
         working-directory: shard-proxy
         run: make test-e2e
+
+  # freebsd/amd64 is a real deployment target (the FreeBSD spines/edges) and this
+  # repo carries a GOOS split — worker/reuseport_freebsd.go vs
+  # worker/reuseport_other.go — that NOTHING else in CI compiles. The Dagger
+  # pipeline builds linux only, so the BSD half rotted unnoticed until it was
+  # found by hand on a live node.
+  #
+  # A linux runner can only cross-BUILD and cross-VET the freebsd target; it
+  # cannot run its tests. So this is honestly a compile + type-check job, not a
+  # test job. Behavioural FreeBSD divergence (e.g. x/net WriteBatch having no
+  # sendmmsg off linux) is out of its reach and still needs a real FreeBSD host.
+  #
+  # Mirrors the e2e job's host-Go setup rather than the dagger job's: it compiles
+  # the repo itself, so the toolchain comes from go.mod (not ci/go.mod) and
+  # shard-common is the usual sibling checkout + replace.
+  cross-build:
+    name: cross-build (freebsd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: shard-proxy
+
+      - name: Resolve shard-common ref
+        id: common_ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ -n "$BRANCH" ] && gh api "repos/lightwebinc/shard-common/branches/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: lightwebinc/shard-common
+          ref: ${{ steps.common_ref.outputs.ref }}
+          path: shard-common
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: shard-proxy/go.mod
+
+      - name: Use local shard-common
+        working-directory: shard-proxy
+        run: go mod edit -replace github.com/lightwebinc/shard-common=../shard-common
+
+      - name: Build (freebsd/amd64)
+        working-directory: shard-proxy
+        env:
+          GOOS: freebsd
+          GOARCH: amd64
+        run: go build -buildvcs=false ./...
+
+      # `go build ./...` does not compile _test.go, so a freebsd-only test that
+      # references a linux-only symbol would still slip through. go vet
+      # type-checks the test files too.
+      - name: Vet (freebsd/amd64)
+        working-directory: shard-proxy
+        env:
+          GOOS: freebsd
+          GOARCH: amd64
+        run: go vet ./...
