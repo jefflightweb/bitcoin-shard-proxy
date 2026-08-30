@@ -40,10 +40,17 @@ func main() {
 	spread := flag.Bool("spread", false, "send one frame per group per cycle with maximally-spaced txids; -count sets cycles (0 = infinite)")
 	fragMTU := flag.Int("frag-mtu", 0, "if >0, split each frame payload into BRC-130 fragments using this path MTU")
 	payloadSize := flag.Int("payload-size", 28, "payload size in bytes")
+	useTCP := flag.Bool("tcp", false, "send over the TCP framed submission lane instead of UDP")
 	blockAnnounce := flag.Bool("block-announce", false, "send BRC-131 BlockAnnounce frames instead of BRC-124 transaction frames")
 	flag.Parse()
 
-	conn, err := net.Dial("udp6", *addr)
+	// -tcp: the same frames as a framed stream on the TCP submission lane
+	// (the supported transport; UDP submission is deprecated).
+	network := "udp6"
+	if *useTCP {
+		network = "tcp6"
+	}
+	conn, err := net.Dial(network, *addr)
 	if err != nil {
 		log.Fatalf("dial %s: %v", *addr, err)
 	}
