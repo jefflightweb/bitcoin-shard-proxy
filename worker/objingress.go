@@ -62,6 +62,8 @@ type ObjectIngress struct {
 	// [TCPIngress.SetAdmitHook]; a push lane is an admission boundary too, so
 	// leaving it unhooked would under-report a miner co-brand's ingress.
 	admit AdmitFunc
+	// connAdmit is admit's per-connection form (see [TCPIngress.SetConnAdmitHook]).
+	connAdmit ConnAdmitFunc
 	// localMirror mirrors egressed DATA datagrams to the co-located LISTENER's
 	// dedicated ingest (own-node delivery). Set on EVERY ingress path's Egress.
 	localMirror string
@@ -78,6 +80,10 @@ func (oi *ObjectIngress) SetLocalMirror(addr string) { oi.localMirror = addr }
 // SetAdmitHook installs fn as this lane's admission observer (see
 // [TCPIngress.SetAdmitHook]). Call before [Run].
 func (oi *ObjectIngress) SetAdmitHook(fn AdmitFunc) { oi.admit = fn }
+
+// SetConnAdmitHook installs fn as this lane's per-connection admission
+// observer (see [ConnAdmitFunc]). Call before [Run].
+func (oi *ObjectIngress) SetConnAdmitHook(fn ConnAdmitFunc) { oi.connAdmit = fn }
 
 // NewObjectIngress constructs an ObjectIngress for the given push class
 // (objfmt.ClassSubtree or objfmt.ClassBlock). No sockets are opened until
@@ -205,6 +211,7 @@ func (oi *ObjectIngress) Run(listenAddr string, listenPort int, done <-chan stru
 func (oi *ObjectIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 	defer func() { _ = conn.Close() }()
 	remote := conn.RemoteAddr()
+	local := conn.LocalAddr()
 
 	rd := objfmt.NewReader(conn, oi.class)
 	rd.SetMaxObject(oi.maxObject)
@@ -219,6 +226,9 @@ func (oi *ObjectIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		}
 		if oi.admit != nil {
 			oi.admit(1, len(obj))
+		}
+		if oi.connAdmit != nil {
+			oi.connAdmit(local, 1, len(obj))
 		}
 		if oi.class == objfmt.ClassBEEF {
 			// The BEEF lane's object IS the submission record; the forwarder

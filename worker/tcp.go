@@ -154,6 +154,11 @@ type TCPIngress struct {
 	// wired only into the UDP loop reads zero on a real fabric. nil = no hook,
 	// and the call sites cost one nil check.
 	admit AdmitFunc
+	// connAdmit is admit's per-connection form: it also receives the LOCAL
+	// address the submitter dialed. A commercial build attributes admission by
+	// destination VIP (one /128 per consumer, per co-brand), which the wire
+	// never carries — only the accepted socket knows it. nil = no hook.
+	connAdmit ConnAdmitFunc
 	// coalesceLinger, when >0 AND coalescing is armed on a connection, is the
 	// bounded window a connection accumulates same-flow frames before flushing,
 	// trading up to this much added latency for denser bundles on a fast
@@ -185,6 +190,33 @@ type AdmitFunc func(frames, bytes int)
 // [Run]. Attribution only — the hook cannot reject, and nothing downstream reads
 // what it records.
 func (ti *TCPIngress) SetAdmitHook(fn AdmitFunc) { ti.admit = fn }
+
+// ConnAdmitFunc is [AdmitFunc] with the accepted socket's LOCAL address — the
+// destination the submitter dialed. Same contract: cheap, non-blocking,
+// attribution only.
+type ConnAdmitFunc func(local net.Addr, frames, bytes int)
+
+// SetConnAdmitHook installs fn as this listener's per-connection admission
+// observer (see [ConnAdmitFunc]). Both hooks may be set; each admission
+// reaches both. Call before [Run].
+func (ti *TCPIngress) SetConnAdmitHook(fn ConnAdmitFunc) { ti.connAdmit = fn }
+
+// admitFor binds this connection's observer: nil when no hook is set, so the
+// per-submission cost stays one nil check.
+func (ti *TCPIngress) admitFor(conn net.Conn) AdmitFunc {
+	if ti.admit == nil && ti.connAdmit == nil {
+		return nil
+	}
+	local := conn.LocalAddr()
+	return func(frames, bytes int) {
+		if ti.admit != nil {
+			ti.admit(frames, bytes)
+		}
+		if ti.connAdmit != nil {
+			ti.connAdmit(local, frames, bytes)
+		}
+	}
+}
 
 // NewTCPIngress constructs a TCPIngress. No sockets are opened until [Run] is
 // called.
@@ -420,6 +452,7 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 	defer func() { _ = conn.Close() }()
 	remote := conn.RemoteAddr()
 	ti.log.Debug("TCP connection accepted", "remote", remote)
+	admit := ti.admitFor(conn)
 
 	// Egress flushes are batched by cadence: enqueue per frame, flush when
 	// maxTCPBatch accumulates or — via flushingReader — before any read that
@@ -443,10 +476,10 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 	if first, err := br.Peek(4); err != nil {
 		return
 	} else if first[0] == 0xBE && first[1] == 0xEF {
-		ti.handleBEEFConn(br, remote, egr, bat)
+		ti.handleBEEFConn(br, remote, egr, bat, admit)
 		return
 	} else if first[0] != 0xE3 || first[1] != 0xE1 || first[2] != 0xF3 || first[3] != 0xE8 {
-		ti.handleBareConn(br, remote, egr, bat)
+		ti.handleBareConn(br, remote, egr, bat, admit)
 		return
 	}
 
@@ -484,8 +517,8 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 			if ti.rec != nil {
 				ti.rec.TCPBytesReceived(frame.SubtreeGroupAnnounceSize)
 			}
-			if ti.admit != nil {
-				ti.admit(1, frame.SubtreeGroupAnnounceSize)
+			if admit != nil {
+				admit(1, frame.SubtreeGroupAnnounceSize)
 			}
 			ti.fwd.ForwardControl(egr, ctrlBuf, shard.GroupSubtreeGroupAnnounce, ti.fwd.EgressPort())
 			bat.add()
@@ -541,8 +574,8 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(hdrSize + payLen)
 		}
-		if ti.admit != nil {
-			ti.admit(1, hdrSize+payLen)
+		if admit != nil {
+			admit(1, hdrSize+payLen)
 		}
 		// The full frame is already read off the stream, so a class
 		// rejection (block/coinbase/subtree on a transaction-only socket)
@@ -569,7 +602,7 @@ func (ti *TCPIngress) handleConn(conn net.Conn, egr *forwarder.Egress) {
 // objectLen ∥ object) and admits each through the shared DispatchClass bare
 // path, which expands the record into one FrameVer 0x09 frame per topic.
 // BEEF is an open class, so the socket's IngressClass admits it regardless.
-func (ti *TCPIngress) handleBEEFConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress, bat *tcpBatcher) {
+func (ti *TCPIngress) handleBEEFConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress, bat *tcpBatcher, admit AdmitFunc) {
 	rd := objfmt.NewReader(br, objfmt.ClassBEEF)
 	for {
 		rec, err := rd.Next()
@@ -582,8 +615,8 @@ func (ti *TCPIngress) handleBEEFConn(br *bufio.Reader, remote net.Addr, egr *for
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(len(rec))
 		}
-		if ti.admit != nil {
-			ti.admit(1, len(rec))
+		if admit != nil {
+			admit(1, len(rec))
 		}
 		// SubmitBEEF copies the object into fresh per-topic frame buffers, so
 		// the Reader window may be reused on the next iteration — and the
@@ -595,7 +628,7 @@ func (ti *TCPIngress) handleBEEFConn(br *bufio.Reader, remote net.Addr, egr *for
 	}
 }
 
-func (ti *TCPIngress) handleBareConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress, bat *tcpBatcher) {
+func (ti *TCPIngress) handleBareConn(br *bufio.Reader, remote net.Addr, egr *forwarder.Egress, bat *tcpBatcher, admit AdmitFunc) {
 	rd := objfmt.NewReader(br, objfmt.ClassTx)
 	for {
 		obj, err := rd.Next()
@@ -608,8 +641,8 @@ func (ti *TCPIngress) handleBareConn(br *bufio.Reader, remote net.Addr, egr *for
 		if ti.rec != nil {
 			ti.rec.TCPBytesReceived(len(obj))
 		}
-		if ti.admit != nil {
-			ti.admit(1, len(obj))
+		if admit != nil {
+			admit(1, len(obj))
 		}
 		// DispatchBareTx (NOT DispatchClass): this connection committed to the
 		// bare grammar, and the tx reader does not validate the version bytes,
